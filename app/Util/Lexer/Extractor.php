@@ -473,7 +473,7 @@ class Extractor extends Regex
             list($all, $before, $at, $username, $list_slug, $outer) = array_pad($match, 6, ['', 0]);
             $start_position = $at[1] > 0 ? StringUtils::strlen(substr($tweet, 0, $at[1])) : $at[1];
             $end_position = $start_position + StringUtils::strlen($at[0]) + StringUtils::strlen($username[0]);
-            $screenname = trim($all[0]) == '@'.$username[0] ? $username[0] : trim($all[0]);
+            $screenname = empty($list_slug[0]) ? $username[0] : $at[0] . $username[0] . $list_slug[0];
 
             if($this->activeUsersOnly == true) {
         		if(!AutolinkService::mentionedUsernameExists($screenname)) {

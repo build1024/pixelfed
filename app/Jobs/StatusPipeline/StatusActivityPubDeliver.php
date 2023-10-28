@@ -53,6 +53,16 @@ class StatusActivityPubDeliver implements ShouldQueue
 		$status = $this->status;
 		$profile = $status->profile;
 
+		// Wait until all media files are uploaded to cloud
+		if (config_cache('pixelfed.cloud_storage')) {
+			foreach ($status->media as $m) {
+				if (!$m->cdn_url) {
+					Log::notice('StatusActivityPubDeliver: Media ID ' . $m->id . ' is not yet uploaded to cloud. Retry in 5 seconds.');
+					return $this->release(5);
+				}
+			}
+		}
+
 		// ignore group posts
         // if($status->group_id != null) {
         //     return;

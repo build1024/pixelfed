@@ -11,6 +11,13 @@
 @if($profile->website)
 <a class="d-none" href="{{$profile->website}}" rel="me external nofollow noopener">{{$profile->website}}</a>
 @endif
+@php
+// extract hyperlinks from bio to insert rel="me" tags
+preg_match_all('/<a .*?href="([^"]*)"[^>]*>/', $profile->bio, $matches_link);
+@endphp
+@foreach($matches_link[1] as $m)
+<a class="d-none" href="{{ html_entity_decode($m) }}" rel="me external nofollow noopener">{{ html_entity_decode($m) }}</a>
+@endforeach
 
 <noscript>
 	<div class="container">

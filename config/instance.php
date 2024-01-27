@@ -110,7 +110,8 @@ return [
 
 	'user_filters' => [
 		'max_user_blocks' => env('PF_MAX_USER_BLOCKS', 50),
-		'max_user_mutes' => env('PF_MAX_USER_MUTES', 50)
+		'max_user_mutes' => env('PF_MAX_USER_MUTES', 50),
+		'max_domain_blocks' => env('PF_MAX_DOMAIN_BLOCKS', 50),
 	],
 
 	'reports' => [
@@ -128,5 +129,15 @@ return [
 
 	'banner' => [
 		'blurhash' => env('INSTANCE_BANNER_BLURHASH', 'UzJR]l{wHZRjM}R%XRkCH?X9xaWEjZj]kAjt')
-	]
+	],
+
+    'parental_controls' => [
+        'enabled' => env('INSTANCE_PARENTAL_CONTROLS', false),
+
+        'limits' => [
+            'respect_open_registration' => env('INSTANCE_PARENTAL_CONTROLS_RESPECT_OPENREG', true),
+            'max_children' => env('INSTANCE_PARENTAL_CONTROLS_MAX_CHILDREN', 1),
+            'auto_verify_email' => true,
+        ],
+    ]
 ];

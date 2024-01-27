@@ -29,7 +29,7 @@
 						<div v-for="(m, index) in cameraRollMedia" :class="[index == 0 ? 'col-12 p-0' : 'col-3 p-0']">
 							<div class="card info-overlay p-0 rounded-0 shadow-none border">
 								<div class="square">
-									<img class="square-content" :src="m.preview_url"></img>
+									<img class="square-content" :src="m.preview_url" />
 								</div>
 							</div>
 						</div>
@@ -1084,6 +1084,16 @@ export default {
 			return App.util.format.timeAgo(ts);
 		},
 
+		formatBytes(bytes, decimals = 2) {
+			if (!+bytes) {
+				return '0 Bytes'
+			}
+			const dec = decimals < 0 ? 0 : decimals
+			const units = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+			const quotient = Math.floor(Math.log(bytes) / Math.log(1024))
+			return `${parseFloat((bytes / Math.pow(1024, quotient)).toFixed(dec))} ${units[quotient]}`
+		},
+
 		fetchProfile() {
 			let tags = {
 				public: 'Public',
@@ -1194,6 +1204,13 @@ export default {
 					}, 300);
 				}).catch(function(e) {
 					switch(e.response.status) {
+						case 413:
+							self.uploading = false;
+							io.value = null;
+							swal('File is too large', 'The file you uploaded has the size of ' + self.formatBytes(io.size) + '. Unfortunately, only images up to ' + self.formatBytes(self.config.uploader.max_photo_size  * 1024) + ' are supported.\nPlease resize the file and try again.', 'error');
+							self.page = 2;
+							break;
+
 						case 451:
 							self.uploading = false;
 							io.value = null;
@@ -1330,6 +1347,7 @@ export default {
 
 						if(count.length) {
 							swal('Missing media descriptions', 'You have enabled mandatory media descriptions. Please add media descriptions under Advanced settings to proceed. For more information, please see the media settings page.', 'warning');
+							this.isPosting = false;
 							return;
 						}
 					}

@@ -200,6 +200,11 @@ Route::domain(config('pixelfed.domain.app'))->middleware(['validemail', 'twofact
     Route::post('auth/raw/mastodon/s/account-to-id', 'RemoteAuthController@accountToId');
     Route::post('auth/raw/mastodon/s/finish-up', 'RemoteAuthController@finishUp');
     Route::post('auth/raw/mastodon/s/login', 'RemoteAuthController@handleLogin');
+    Route::get('auth/pci/{id}/{code}', 'ParentalControlsController@inviteRegister');
+    Route::post('auth/pci/{id}/{code}', 'ParentalControlsController@inviteRegisterStore');
+
+    Route::get('auth/forgot/email', 'UserEmailForgotController@index')->name('email.forgot');
+    Route::post('auth/forgot/email', 'UserEmailForgotController@store')->middleware('throttle:10,900,forgotEmail');
 
 	Route::get('discover', 'DiscoverController@home')->name('discover');
 
@@ -489,6 +494,7 @@ Route::domain(config('pixelfed.domain.app'))->middleware(['validemail', 'twofact
 		Route::post('privacy/muted-users', 'SettingsController@mutedUsersUpdate');
 		Route::get('privacy/blocked-users', 'SettingsController@blockedUsers')->name('settings.privacy.blocked-users');
 		Route::post('privacy/blocked-users', 'SettingsController@blockedUsersUpdate');
+		Route::get('privacy/domain-blocks', 'SettingsController@domainBlocks')->name('settings.privacy.domain-blocks');
 		Route::get('privacy/blocked-instances', 'SettingsController@blockedInstances')->name('settings.privacy.blocked-instances');
 		Route::post('privacy/blocked-instances', 'SettingsController@blockedInstanceStore');
 		Route::post('privacy/blocked-instances/unblock', 'SettingsController@blockedInstanceUnblock')->name('settings.privacy.blocked-instances.unblock');
@@ -532,6 +538,16 @@ Route::domain(config('pixelfed.domain.app'))->middleware(['validemail', 'twofact
 			);
 
 		});
+
+		Route::get('parental-controls', 'ParentalControlsController@index')->name('settings.parental-controls')->middleware('dangerzone');
+		Route::get('parental-controls/add', 'ParentalControlsController@add')->name('settings.pc.add')->middleware('dangerzone');
+		Route::post('parental-controls/add', 'ParentalControlsController@store')->middleware('dangerzone');
+		Route::get('parental-controls/manage/{id}', 'ParentalControlsController@view')->middleware('dangerzone');
+		Route::post('parental-controls/manage/{id}', 'ParentalControlsController@update')->middleware('dangerzone');
+		Route::get('parental-controls/manage/{id}/cancel-invite', 'ParentalControlsController@cancelInvite')->name('settings.pc.cancel-invite')->middleware('dangerzone');
+		Route::post('parental-controls/manage/{id}/cancel-invite', 'ParentalControlsController@cancelInviteHandle')->middleware('dangerzone');
+		Route::get('parental-controls/manage/{id}/stop-managing', 'ParentalControlsController@stopManaging')->name('settings.pc.stop-managing')->middleware('dangerzone');
+		Route::post('parental-controls/manage/{id}/stop-managing', 'ParentalControlsController@stopManagingHandle')->middleware('dangerzone');
 
 		Route::get('applications', 'SettingsController@applications')->name('settings.applications')->middleware('dangerzone');
 		Route::get('data-export', 'SettingsController@dataExport')->name('settings.dataexport')->middleware('dangerzone');
@@ -617,6 +633,7 @@ Route::domain(config('pixelfed.domain.app'))->middleware(['validemail', 'twofact
 			Route::view('licenses', 'site.help.licenses')->name('help.licenses');
 			Route::view('instance-max-users-limit', 'site.help.instance-max-users')->name('help.instance-max-users-limit');
 			Route::view('import', 'site.help.import')->name('help.import');
+			Route::view('parental-controls', 'site.help.parental-controls');
 		});
 		Route::get('newsroom/{year}/{month}/{slug}', 'NewsroomController@show');
 		Route::get('newsroom/archive', 'NewsroomController@archive');

@@ -26,6 +26,8 @@ class StatusActivityPubDeliver implements ShouldQueue
 
 	protected $status;
 
+	public $tries = 50;
+
 	/**
 	 * Delete the job if its models no longer exist.
 	 *

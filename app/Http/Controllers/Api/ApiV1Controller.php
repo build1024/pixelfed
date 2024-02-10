@@ -125,11 +125,15 @@ class ApiV1Controller extends Controller
         return response()->json($res, $code, $headers, JSON_UNESCAPED_SLASHES);
     }
 
+    /**
+     * GET /api/v1/apps/verify_credentials
+     */
     public function getApp(Request $request)
     {
-        if(!$request->user()) {
-            return response('', 403);
-        }
+        # FIXME: /api/v1/apps/verify_credentials should be accessible with any
+        # valid Access Token, not just a user's access token (i.e., client
+        # credentails grant flow access tokens)
+        abort_if(!$request->user() || !$request->user()->token(), 403);
 
         $client = $request->user()->token()->client;
         $res = [
@@ -141,6 +145,9 @@ class ApiV1Controller extends Controller
         return $this->json($res);
     }
 
+    /**
+     * POST /api/v1/apps
+     */
     public function apps(Request $request)
     {
         abort_if(!config_cache('pixelfed.oauth_enabled'), 404);
@@ -187,9 +194,11 @@ class ApiV1Controller extends Controller
      */
     public function verifyCredentials(Request $request)
     {
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         $user = $request->user();
 
-        abort_if(!$user, 403);
         abort_if($user->status != null, 403);
         AccountService::setLastActive($user->id);
 
@@ -215,9 +224,16 @@ class ApiV1Controller extends Controller
      */
     public function accountById(Request $request, $id)
     {
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         $res = $request->has(self::PF_API_ENTITY_KEY) ? AccountService::get($id, true) : AccountService::getMastodon($id, true);
         if(!$res) {
             return response()->json(['error' => 'Record not found'], 404);
+        }
+        if($res && strpos($res['acct'], '@') != -1) {
+            $domain = parse_url($res['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
         }
         return $this->json($res);
     }
@@ -229,7 +245,8 @@ class ApiV1Controller extends Controller
      */
     public function accountUpdateCredentials(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         if(config('pixelfed.bouncer.cloud_ips.ban_api')) {
             abort_if(BouncerService::checkIp($request->ip()), 404);
@@ -472,7 +489,8 @@ class ApiV1Controller extends Controller
      */
     public function accountFollowersById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $account = AccountService::get($id);
         abort_if(!$account, 404);
@@ -482,6 +500,11 @@ class ApiV1Controller extends Controller
         ]);
         $limit = $request->input('limit', 10);
         $napi = $request->has(self::PF_API_ENTITY_KEY);
+
+        if($account && strpos($account['acct'], '@') != -1) {
+            $domain = parse_url($account['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
 
         if(intval($pid) !== intval($account['id'])) {
             if($account['locked']) {
@@ -564,7 +587,8 @@ class ApiV1Controller extends Controller
      */
     public function accountFollowingById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $account = AccountService::get($id);
         abort_if(!$account, 404);
@@ -574,6 +598,11 @@ class ApiV1Controller extends Controller
         ]);
         $limit = $request->input('limit', 10);
         $napi = $request->has(self::PF_API_ENTITY_KEY);
+
+        if($account && strpos($account['acct'], '@') != -1) {
+            $domain = parse_url($account['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
 
         if(intval($pid) !== intval($account['id'])) {
             if($account['locked']) {
@@ -656,6 +685,9 @@ class ApiV1Controller extends Controller
      */
     public function accountStatusesById(Request $request, $id)
     {
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         $user = $request->user();
 
         $this->validate($request, [
@@ -674,6 +706,11 @@ class ApiV1Controller extends Controller
 
         if(!$profile || !isset($profile['id']) || !$user) {
             return $this->json(['error' => 'Account not found'], 404);
+        }
+
+        if($profile && strpos($profile['acct'], '@') != -1) {
+            $domain = parse_url($profile['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
         }
 
         $limit = $request->limit ?? 20;
@@ -755,7 +792,8 @@ class ApiV1Controller extends Controller
      */
     public function accountFollowById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('follow'), 403);
 
         $user = $request->user();
         abort_if($user->has_roles && !UserRoleService::can('can-follow', $user->id), 403, 'Invalid permissions for this action');
@@ -765,6 +803,11 @@ class ApiV1Controller extends Controller
         $target = Profile::where('id', '!=', $user->profile_id)
             ->whereNull('status')
             ->findOrFail($id);
+
+        if($target && $target->domain) {
+            $domain = $target->domain;
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
 
         $private = (bool) $target->is_private;
         $remote = (bool) $target->domain;
@@ -842,7 +885,8 @@ class ApiV1Controller extends Controller
      */
     public function accountUnfollowById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('follow'), 403);
 
         $user = $request->user();
 
@@ -941,7 +985,8 @@ class ApiV1Controller extends Controller
      */
     public function accountSearch(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request, [
             'q'         => 'required|string|min:1|max:255',
@@ -984,7 +1029,8 @@ class ApiV1Controller extends Controller
      */
     public function accountBlocks(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request, [
             'limit'     => 'nullable|integer|min:1|max:40',
@@ -1021,7 +1067,8 @@ class ApiV1Controller extends Controller
      */
     public function accountBlockById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $user = $request->user();
         $pid = $user->profile_id ?? $user->profile->id;
@@ -1114,7 +1161,8 @@ class ApiV1Controller extends Controller
      */
     public function accountUnblockById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $user = $request->user();
         $pid = $user->profile_id ?? $user->profile->id;
@@ -1165,7 +1213,9 @@ class ApiV1Controller extends Controller
      */
     public function accountDomainBlocks(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         return response()->json([]);
     }
 
@@ -1178,7 +1228,9 @@ class ApiV1Controller extends Controller
      */
     public function accountEndorsements(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         return response()->json([]);
     }
 
@@ -1191,7 +1243,9 @@ class ApiV1Controller extends Controller
      */
     public function accountFavourites(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         $this->validate($request, [
             'limit' => 'sometimes|integer|min:1|max:40'
         ]);
@@ -1247,18 +1301,24 @@ class ApiV1Controller extends Controller
      */
     public function statusFavouriteById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $user = $request->user();
         abort_if($user->has_roles && !UserRoleService::can('can-like', $user->id), 403, 'Invalid permissions for this action');
 
-        AccountService::setLastActive($user->id);
-
         $status = StatusService::getMastodon($id, false);
 
-        abort_unless($status, 400);
+        abort_unless($status, 404);
+
+        if($status && isset($status['account'], $status['account']['acct']) && strpos($status['account']['acct'], '@') != -1) {
+            $domain = parse_url($status['account']['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
 
         $spid = $status['account']['id'];
+
+        AccountService::setLastActive($user->id);
 
         if(intval($spid) !== intval($user->profile_id)) {
             if($status['visibility'] == 'private') {
@@ -1309,7 +1369,8 @@ class ApiV1Controller extends Controller
      */
     public function statusUnfavouriteById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $user = $request->user();
         abort_if($user->has_roles && !UserRoleService::can('can-like', $user->id), 403, 'Invalid permissions for this action');
@@ -1352,7 +1413,8 @@ class ApiV1Controller extends Controller
      */
     public function accountFilters(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         return response()->json([]);
     }
@@ -1366,7 +1428,9 @@ class ApiV1Controller extends Controller
      */
     public function accountFollowRequests(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         $this->validate($request, [
             'limit' => 'sometimes|integer|min:1|max:100'
         ]);
@@ -1396,12 +1460,19 @@ class ApiV1Controller extends Controller
      */
     public function accountFollowRequestAccept(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('follow'), 403);
+
         $pid = $request->user()->profile_id;
         $target = AccountService::getMastodon($id);
 
         if(!$target) {
             return response()->json(['error' => 'Record not found'], 404);
+        }
+
+        if($target && strpos($target['acct'], '@') != -1) {
+            $domain = parse_url($target['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
         }
 
         $followRequest = FollowRequest::whereFollowingId($pid)->whereFollowerId($id)->first();
@@ -1448,7 +1519,9 @@ class ApiV1Controller extends Controller
      */
     public function accountFollowRequestReject(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('follow'), 403);
+
         $pid = $request->user()->profile_id;
         $target = AccountService::getMastodon($id);
 
@@ -1484,7 +1557,8 @@ class ApiV1Controller extends Controller
      */
     public function accountSuggestions(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         // todo
 
@@ -1585,7 +1659,8 @@ class ApiV1Controller extends Controller
      */
     public function accountLists(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         return response()->json([]);
     }
@@ -1599,7 +1674,8 @@ class ApiV1Controller extends Controller
      */
     public function accountListsById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         return response()->json([]);
     }
@@ -1612,7 +1688,8 @@ class ApiV1Controller extends Controller
      */
     public function mediaUpload(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $this->validate($request, [
             'file.*' => [
@@ -1748,7 +1825,8 @@ class ApiV1Controller extends Controller
      */
     public function mediaUpdate(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $this->validate($request, [
           'description' => 'nullable|string|max:' . config_cache('pixelfed.max_altext_length')
@@ -1801,7 +1879,8 @@ class ApiV1Controller extends Controller
      */
     public function mediaGet(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $user = $request->user();
         abort_if($user->has_roles && !UserRoleService::can('can-post', $user->id), 403, 'Invalid permissions for this action');
@@ -1824,7 +1903,8 @@ class ApiV1Controller extends Controller
      */
     public function mediaUploadV2(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $this->validate($request, [
             'file.*' => [
@@ -1965,7 +2045,8 @@ class ApiV1Controller extends Controller
      */
     public function accountMutes(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request, [
             'limit' => 'nullable|integer|min:1|max:40'
@@ -2000,7 +2081,8 @@ class ApiV1Controller extends Controller
      */
     public function accountMuteById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $user = $request->user();
         $pid = $user->profile_id;
@@ -2010,6 +2092,11 @@ class ApiV1Controller extends Controller
         }
 
         $account = Profile::findOrFail($id);
+
+        if($account && $account->domain) {
+            $domain = $account->domain;
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
 
         $count = UserFilterService::muteCount($pid);
         $maxLimit = intval(config('instance.user_filters.max_user_mutes'));
@@ -2053,7 +2140,8 @@ class ApiV1Controller extends Controller
      */
     public function accountUnmuteById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $user = $request->user();
         $pid = $user->profile_id;
@@ -2089,7 +2177,8 @@ class ApiV1Controller extends Controller
      */
     public function accountNotifications(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request, [
             'limit' => 'nullable|integer|min:1|max:100',
@@ -2165,7 +2254,10 @@ class ApiV1Controller extends Controller
      */
     public function timelineHome(Request $request)
     {
-        $this->validate($request,[
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
+        $this->validate($request, [
             'page'        => 'sometimes|integer|max:40',
             'min_id'      => 'sometimes|integer|min:0|max:' . PHP_INT_MAX,
             'max_id'      => 'sometimes|integer|min:0|max:' . PHP_INT_MAX,
@@ -2567,7 +2659,9 @@ class ApiV1Controller extends Controller
      */
     public function conversations(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         $this->validate($request, [
             'limit' => 'min:1|max:40',
             'scope' => 'nullable|in:inbox,sent,requests'
@@ -2644,13 +2738,20 @@ class ApiV1Controller extends Controller
      */
     public function statusById(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         AccountService::setLastActive($request->user()->id);
         $pid = $request->user()->profile_id;
 
         $res = $request->has(self::PF_API_ENTITY_KEY) ? StatusService::get($id, false) : StatusService::getMastodon($id, false);
         if(!$res || !isset($res['visibility'])) {
             abort(404);
+        }
+
+        if($res && isset($res['account'], $res['account']['acct'], $res['account']['url']) && strpos($res['account']['acct'], '@') != -1) {
+            $domain = parse_url($res['account']['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
         }
 
         $scope = $res['visibility'];
@@ -2686,7 +2787,8 @@ class ApiV1Controller extends Controller
      */
     public function statusContext(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $user = $request->user();
         AccountService::setLastActive($user->id);
@@ -2695,6 +2797,11 @@ class ApiV1Controller extends Controller
 
         if(!$status || !isset($status['account'])) {
             return response('', 404);
+        }
+
+        if($status && isset($status['account'], $status['account']['acct']) && strpos($status['account']['acct'], '@') != -1) {
+            $domain = parse_url($status['account']['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
         }
 
         if(intval($status['account']['id']) !== intval($user->profile_id)) {
@@ -2754,7 +2861,9 @@ class ApiV1Controller extends Controller
      */
     public function statusCard(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
+
         $res = [];
         return response()->json($res);
     }
@@ -2768,7 +2877,8 @@ class ApiV1Controller extends Controller
      */
     public function statusRebloggedBy(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request, [
             'limit' => 'sometimes|integer|min:1|max:80'
@@ -2780,6 +2890,10 @@ class ApiV1Controller extends Controller
         $status = Status::findOrFail($id);
         $account = AccountService::get($status->profile_id, true);
         abort_if(!$account, 404);
+        if($account && strpos($account['acct'], '@') != -1) {
+            $domain = parse_url($account['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
         $author = intval($status->profile_id) === intval($pid) || $user->is_admin;
         $napi = $request->has(self::PF_API_ENTITY_KEY);
 
@@ -2860,7 +2974,8 @@ class ApiV1Controller extends Controller
      */
     public function statusFavouritedBy(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request, [
             'limit' => 'nullable|integer|min:1|max:80'
@@ -2871,6 +2986,10 @@ class ApiV1Controller extends Controller
         $pid = $user->profile_id;
         $status = Status::findOrFail($id);
         $account = AccountService::get($status->profile_id, true);
+        if($account && strpos($account['acct'], '@') != -1) {
+            $domain = parse_url($account['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
         abort_if(!$account, 404);
         $author = intval($status->profile_id) === intval($pid) || $user->is_admin;
         $napi = $request->has(self::PF_API_ENTITY_KEY);
@@ -2953,7 +3072,8 @@ class ApiV1Controller extends Controller
      */
     public function statusCreate(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $this->validate($request, [
             'status' => 'nullable|string',
@@ -3031,7 +3151,7 @@ class ApiV1Controller extends Controller
 
         $content = strip_tags($request->input('status'));
         $rendered = Autolink::create()->autolink($content);
-        $cw = $user->profile->cw == true ? true : $request->input('sensitive', false);
+        $cw = $user->profile->cw == true ? true : $request->boolean('sensitive', false);
         $spoilerText = $cw && $request->filled('spoiler_text') ? $request->input('spoiler_text') : null;
 
         if($in_reply_to_id) {
@@ -3168,7 +3288,9 @@ class ApiV1Controller extends Controller
      */
     public function statusDelete(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
+
         AccountService::setLastActive($request->user()->id);
         $status = Status::whereProfileId($request->user()->profile->id)
         ->findOrFail($id);
@@ -3194,13 +3316,18 @@ class ApiV1Controller extends Controller
      */
     public function statusShare(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $user = $request->user();
         abort_if($user->has_roles && !UserRoleService::can('can-share', $user->id), 403, 'Invalid permissions for this action');
         AccountService::setLastActive($user->id);
         $status = Status::whereScope('public')->findOrFail($id);
-
+        if($status && ($status->uri || $status->url || $status->object_url)) {
+            $url = $status->uri ?? $status->url ?? $status->object_url;
+            $domain = parse_url($url, PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
         if(intval($status->profile_id) !== intval($user->profile_id)) {
             if($status->scope == 'private') {
                 abort_if(!FollowerService::follows($user->profile_id, $status->profile_id), 403);
@@ -3242,7 +3369,8 @@ class ApiV1Controller extends Controller
      */
     public function statusUnshare(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $user = $request->user();
         abort_if($user->has_roles && !UserRoleService::can('can-share', $user->id), 403, 'Invalid permissions for this action');
@@ -3285,7 +3413,8 @@ class ApiV1Controller extends Controller
      */
     public function timelineHashtag(Request $request, $hashtag)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request,[
           'page'        => 'nullable|integer|max:40',
@@ -3386,7 +3515,8 @@ class ApiV1Controller extends Controller
      */
     public function bookmarks(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request, [
             'limit' => 'nullable|integer|min:1|max:40',
@@ -3453,7 +3583,8 @@ class ApiV1Controller extends Controller
      */
     public function bookmarkStatus(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $status = Status::findOrFail($id);
         $pid = $request->user()->profile_id;
@@ -3493,7 +3624,8 @@ class ApiV1Controller extends Controller
      */
     public function unbookmarkStatus(Request $request, $id)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $status = Status::findOrFail($id);
         $pid = $request->user()->profile_id;
@@ -3525,7 +3657,8 @@ class ApiV1Controller extends Controller
      */
     public function discoverPosts(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $this->validate($request, [
             'limit' => 'integer|min:1|max:40'
@@ -3535,26 +3668,26 @@ class ApiV1Controller extends Controller
         $pid = $request->user()->profile_id;
         $filters = UserFilterService::filters($pid);
         $forYou = DiscoverService::getForYou();
-        $posts = $forYou->take(50)->map(function($post) {
+        $posts = $forYou->take(50)->map(function ($post) {
             return StatusService::getMastodon($post);
         })
-        ->filter(function($post) use($filters) {
-            return $post &&
-                isset($post['account']) &&
-                isset($post['account']['id']) &&
-                !in_array($post['account']['id'], $filters);
-        })
-        ->take(12)
-        ->values();
+            ->filter(function ($post) use ($filters) {
+                return $post &&
+                    isset($post['account']) &&
+                    isset($post['account']['id']) &&
+                    !in_array($post['account']['id'], $filters);
+            })
+            ->take(12)
+            ->values();
         return $this->json(compact('posts'));
     }
 
     /**
-    * GET /api/v2/statuses/{id}/replies
-    *
-    *
-    * @return array
-    */
+     * GET /api/v2/statuses/{id}/replies
+     *
+     *
+     * @return array
+     */
     public function statusReplies(Request $request, $id)
     {
         abort_if(!$request->user(), 403);
@@ -3646,11 +3779,11 @@ class ApiV1Controller extends Controller
     }
 
     /**
-    * GET /api/v2/statuses/{id}/state
-    *
-    *
-    * @return array
-    */
+     * GET /api/v2/statuses/{id}/state
+     *
+     *
+     * @return array
+     */
     public function statusState(Request $request, $id)
     {
         abort_if(!$request->user(), 403);
@@ -3663,14 +3796,15 @@ class ApiV1Controller extends Controller
     }
 
     /**
-    * GET /api/v1.1/discover/accounts/popular
-    *
-    *
-    * @return array
-    */
+     * GET /api/v1.1/discover/accounts/popular
+     *
+     *
+     * @return array
+     */
     public function discoverAccountsPopular(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $pid = $request->user()->profile_id;
 
@@ -3705,14 +3839,15 @@ class ApiV1Controller extends Controller
     }
 
     /**
-    * GET /api/v1/preferences
-    *
-    *
-    * @return array
-    */
+     * GET /api/v1/preferences
+     *
+     *
+     * @return array
+     */
     public function getPreferences(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $pid = $request->user()->profile_id;
         $account = AccountService::get($pid);
@@ -3727,40 +3862,43 @@ class ApiV1Controller extends Controller
     }
 
     /**
-    * GET /api/v1/trends
-    *
-    *
-    * @return array
-    */
+     * GET /api/v1/trends
+     *
+     *
+     * @return array
+     */
     public function getTrends(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         return $this->json([]);
     }
 
     /**
-    * GET /api/v1/announcements
-    *
-    *
-    * @return array
-    */
+     * GET /api/v1/announcements
+     *
+     *
+     * @return array
+     */
     public function getAnnouncements(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         return $this->json([]);
     }
 
     /**
-    * GET /api/v1/markers
-    *
-    *
-    * @return array
-    */
+     * GET /api/v1/markers
+     *
+     *
+     * @return array
+     */
     public function getMarkers(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('read'), 403);
 
         $type = $request->input('timeline');
         if(is_array($type)) {
@@ -3774,14 +3912,15 @@ class ApiV1Controller extends Controller
     }
 
     /**
-    * POST /api/v1/markers
-    *
-    *
-    * @return array
-    */
+     * POST /api/v1/markers
+     *
+     *
+     * @return array
+     */
     public function setMarkers(Request $request)
     {
-        abort_if(!$request->user(), 403);
+        abort_if(!$request->user() || !$request->user()->token(), 403);
+        abort_unless($request->user()->tokenCan('write'), 403);
 
         $pid = $request->user()->profile_id;
         $home = $request->input('home[last_read_id]');

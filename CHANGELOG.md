@@ -1,6 +1,21 @@
 # Release Notes
 
-## [Unreleased](https://github.com/pixelfed/pixelfed/compare/v0.11.11...dev)
+## [Unreleased](https://github.com/pixelfed/pixelfed/compare/v0.11.12...dev)
+-  ([](https://github.com/pixelfed/pixelfed/commit/))
+
+## [v0.11.12 (2024-02-16)](https://github.com/pixelfed/pixelfed/compare/v0.11.11...v0.11.12)
+
+### Features
+- Autospam Live Filters - block remote activities based on comma separated keywords ([40b45b2a](https://github.com/pixelfed/pixelfed/commit/40b45b2a))
+- Added Software Update banner to admin home feeds ([b0fb1988](https://github.com/pixelfed/pixelfed/commit/b0fb1988))
+
+### Updated
+
+- Update ApiV1Controller, fix network timeline ([0faf59e3](https://github.com/pixelfed/pixelfed/commit/0faf59e3))
+- Update public/network timelines, fix non-redis response and fix reblogs in home feed ([8b4ac5cc](https://github.com/pixelfed/pixelfed/commit/8b4ac5cc))
+- Update Federation, use proper Content-Type headers for following/follower collections ([fb0bb9a3](https://github.com/pixelfed/pixelfed/commit/fb0bb9a3))
+- Update ActivityPubFetchService, enforce stricter Content-Type validation ([1232cfc8](https://github.com/pixelfed/pixelfed/commit/1232cfc8))
+- Update status view, fix unlisted/private scope bug ([0f3ca194](https://github.com/pixelfed/pixelfed/commit/0f3ca194))
 
 ## [v0.11.11 (2024-02-09)](https://github.com/pixelfed/pixelfed/compare/v0.11.10...v0.11.11)
 
@@ -27,7 +42,6 @@
 ### Federation
 - Update Privacy Settings, add support for Mastodon `indexable` search flag ([fc24630e](https://github.com/pixelfed/pixelfed/commit/fc24630e))
 - Update AP Helpers, consume actor `indexable` attribute ([fbdcdd9d](https://github.com/pixelfed/pixelfed/commit/fbdcdd9d))
--  ([](https://github.com/pixelfed/pixelfed/commit/))
 
 ### Updates
 - Update FollowerService, add forget method to RelationshipService call to reduce load when mass purging ([347e4f59](https://github.com/pixelfed/pixelfed/commit/347e4f59))
@@ -112,7 +126,6 @@
 - Update PublicApiController, consume InstanceService blocked domains for account and statuses endpoints ([01b33fb3](https://github.com/pixelfed/pixelfed/commit/01b33fb3))
 - Update ApiV1Controller, enforce blocked instance domain logic ([5b284cac](https://github.com/pixelfed/pixelfed/commit/5b284cac))
 - Update ApiV2Controller, add vapid key to instance object. Thanks thisismissem! ([4d02d6f1](https://github.com/pixelfed/pixelfed/commit/4d02d6f1))
--  ([](https://github.com/pixelfed/pixelfed/commit/))
 
 ## [v0.11.9 (2023-08-21)](https://github.com/pixelfed/pixelfed/compare/v0.11.8...v0.11.9)
 

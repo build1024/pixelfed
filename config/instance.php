@@ -29,11 +29,12 @@ return [
 		],
 
 		'local' => [
+			'cached' => env('INSTANCE_PUBLIC_TIMELINE_CACHED', false),
 			'is_public' => env('INSTANCE_PUBLIC_LOCAL_TIMELINE', false)
 		],
 
 		'network' => [
-			'cached' => env('PF_NETWORK_TIMELINE') ? env('INSTANCE_NETWORK_TIMELINE_CACHED', true) : false,
+			'cached' => env('PF_NETWORK_TIMELINE') ? env('INSTANCE_NETWORK_TIMELINE_CACHED', false) : false,
 			'cache_dropoff' => env('INSTANCE_NETWORK_TIMELINE_CACHE_DROPOFF', 100),
 			'max_hours_old' => env('INSTANCE_NETWORK_TIMELINE_CACHE_MAX_HOUR_INGEST', 6)
 		]
@@ -139,5 +140,9 @@ return [
             'max_children' => env('INSTANCE_PARENTAL_CONTROLS_MAX_CHILDREN', 1),
             'auto_verify_email' => true,
         ],
-    ]
+    ],
+
+    'software-update' => [
+        'disable_failed_warning' => env('INSTANCE_SOFTWARE_UPDATE_DISABLE_FAILED_WARNING', false)
+    ],
 ];

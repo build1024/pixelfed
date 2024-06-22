@@ -132,7 +132,7 @@ class StatusController extends Controller
         if (! $profile || $profile['locked'] || ! $profile['local']) {
             $content = view('status.embed-removed');
 
-            return response($content)->header('X-Frame-Options', 'ALLOWALL');
+            return response($content, 404)->header('X-Frame-Options', 'ALLOWALL');
         }
 
         $aiCheck = Cache::remember('profile:ai-check:spam-login:'.$profile['id'], 3600, function () use ($profile) {
@@ -151,7 +151,7 @@ class StatusController extends Controller
         if ($aiCheck) {
             $res = view('status.embed-removed');
 
-            return response($res)->withHeaders(['X-Frame-Options' => 'ALLOWALL']);
+            return response($res, 404)->withHeaders(['X-Frame-Options' => 'ALLOWALL']);
         }
 
         $status = StatusService::get($id);
@@ -166,7 +166,7 @@ class StatusController extends Controller
         ) {
             $content = view('status.embed-removed');
 
-            return response($content)->header('X-Frame-Options', 'ALLOWALL');
+            return response($content, 404)->header('X-Frame-Options', 'ALLOWALL');
         }
 
         $showLikes = $request->filled('likes') && $request->likes == true;

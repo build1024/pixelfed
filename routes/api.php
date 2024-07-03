@@ -26,6 +26,7 @@ Route::group(['prefix' => 'api'], function() use($middleware) {
         Route::post('apps', 'Api\ApiV1Controller@apps');
         Route::get('apps/verify_credentials', 'Api\ApiV1Controller@getApp')->middleware($middleware);
         Route::get('instance', 'Api\ApiV1Controller@instance');
+        Route::get('instance/peers', 'Api\ApiV1Controller@instancePeers');
         Route::get('bookmarks', 'Api\ApiV1Controller@bookmarks')->middleware($middleware);
 
         Route::get('accounts/verify_credentials', 'Api\ApiV1Controller@verifyCredentials')->middleware($middleware);
@@ -123,6 +124,7 @@ Route::group(['prefix' => 'api'], function() use($middleware) {
             Route::get('emails-from-pixelfed', 'Api\ApiV1Dot1Controller@accountEmailsFromPixelfed')->middleware($middleware);
             Route::get('apps-and-applications', 'Api\ApiV1Dot1Controller@accountApps')->middleware($middleware);
             Route::get('mutuals/{id}', 'Api\ApiV1Dot1Controller@getMutualAccounts')->middleware($middleware);
+            Route::get('username/{username}', 'Api\ApiV1Dot1Controller@accountUsernameToId')->middleware($middleware);
         });
 
         Route::group(['prefix' => 'collections'], function () use($middleware) {
@@ -133,6 +135,7 @@ Route::group(['prefix' => 'api'], function() use($middleware) {
             Route::post('update/{id}', 'CollectionController@store')->middleware($middleware);
             Route::delete('delete/{id}', 'CollectionController@delete')->middleware($middleware);
             Route::post('remove', 'CollectionController@deleteId')->middleware($middleware);
+            Route::get('self', 'CollectionController@getSelfCollections')->middleware($middleware);
         });
 
         Route::group(['prefix' => 'direct'], function () use($middleware) {
@@ -174,6 +177,7 @@ Route::group(['prefix' => 'api'], function() use($middleware) {
             Route::get('accounts/popular', 'Api\ApiV1Controller@discoverAccountsPopular')->middleware($middleware);
             Route::get('posts/trending', 'DiscoverController@trendingApi')->middleware($middleware);
             Route::get('posts/hashtags', 'DiscoverController@trendingHashtags')->middleware($middleware);
+            Route::get('posts/network/trending', 'DiscoverController@discoverNetworkTrending')->middleware($middleware);
         });
 
         Route::group(['prefix' => 'directory'], function () use($middleware) {
@@ -264,6 +268,7 @@ Route::group(['prefix' => 'api'], function() use($middleware) {
                 Route::post('update/{id}', 'CollectionController@store')->middleware($middleware);
                 Route::delete('delete/{id}', 'CollectionController@delete')->middleware($middleware);
                 Route::post('remove', 'CollectionController@deleteId')->middleware($middleware);
+                Route::get('self', 'CollectionController@getSelfCollections')->middleware($middleware);
             });
 
             Route::group(['prefix' => 'compose'], function () use($middleware) {

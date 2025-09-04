@@ -57,7 +57,7 @@ return [
 
 		// Self links
 		'profile' => '個人檔案',
-		'drive' => 'Drive',
+		'drive' => '雲端硬碟',
 		'settings' => '設定',
 		'compose' => '新增',
 		'logout' => '登出',
@@ -122,7 +122,7 @@ return [
 		'unfollow' => '取消追蹤',
 		'editProfile' => '編輯個人檔案',
 		'followRequested' => '追蹤請求',
-		'joined' => 'Joined',
+		'joined' => '已加入',
 
 		'emptyCollections' => 'We can\'t seem to find any collections',
 		'emptyPosts' => 'We can\'t seem to find any posts',

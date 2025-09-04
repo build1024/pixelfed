@@ -19,6 +19,7 @@ use App\Services\MediaBlocklistService;
 use App\Services\MediaPathService;
 use App\Services\MediaStorageService;
 use App\Services\MediaTagService;
+use App\Services\PlaceService;
 use App\Services\SnowflakeService;
 use App\Services\UserRoleService;
 use App\Services\UserStorageService;
@@ -30,7 +31,6 @@ use App\Util\Media\License;
 use Auth;
 use Cache;
 use DB;
-use Purify;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use League\Fractal;
@@ -228,19 +228,24 @@ class ComposeController extends Controller
         abort_if(! $request->user(), 403);
 
         $this->validate($request, [
-            'q' => 'required|string|min:1|max:50',
+            'q' => [
+                'required',
+                'string',
+                'min:1',
+                'max:300',
+            ],
         ]);
 
         $q = $request->input('q');
 
-        if (Str::of($q)->startsWith('@')) {
-            if (strlen($q) < 3) {
-                return [];
-            }
-            $q = mb_substr($q, 1);
+        $cleanQuery = Str::of($q)->startsWith('@') ? Str::substr($q, 1) : $q;
+
+        if (strlen($cleanQuery) < 2) {
+            return [];
         }
 
         $user = $request->user();
+        $currentUserId = $request->user()->profile_id;
 
         abort_if($user->has_roles && ! UserRoleService::can('can-post', $user->id), 403, 'Invalid permissions for this action');
 
@@ -251,10 +256,27 @@ class ComposeController extends Controller
 
         $blocked->push($request->user()->profile_id);
 
-        $results = Profile::select('id', 'domain', 'username')
-            ->whereNotIn('id', $blocked)
-            ->whereNull('domain')
-            ->where('username', 'like', '%'.$q.'%')
+        $operator = config('database.default') === 'pgsql' ? 'ilike' : 'like';
+        $results = Profile::select([
+            'profiles.id',
+            'profiles.domain',
+            'profiles.username',
+            'profiles.followers_count',
+        ])
+            ->selectRaw('MAX(CASE WHEN followers.following_id IS NOT NULL THEN 1 ELSE 0 END) as is_followed')
+            ->leftJoin('followers', function ($join) use ($currentUserId) {
+                $join->on('followers.following_id', '=', 'profiles.id')
+                    ->where('followers.profile_id', '=', $currentUserId);
+            })
+            ->whereNotIn('profiles.id', $blocked)
+            ->where(function ($query) use ($cleanQuery, $operator) {
+                $query->where('profiles.username', $operator, $cleanQuery.'%')
+                    ->orWhere('profiles.username', $operator, '%'.$cleanQuery.'%');
+            })
+            ->groupBy('profiles.id', 'profiles.domain', 'profiles.username', 'profiles.followers_count')
+            ->orderByDesc('is_followed')
+            ->orderByDesc('profiles.followers_count')
+            ->orderBy('profiles.username')
             ->limit(15)
             ->get()
             ->map(function ($r) {
@@ -388,38 +410,63 @@ class ComposeController extends Controller
         abort_if(! $request->user(), 403);
 
         $this->validate($request, [
-            'q' => 'required|string|min:2|max:50',
+            'q' => [
+                'required',
+                'string',
+                'min:2',
+                'max:50',
+                'regex:/^[@]?[a-zA-Z0-9._-]+$/',
+            ],
         ]);
 
         abort_if($request->user()->has_roles && ! UserRoleService::can('can-post', $request->user()->id), 403, 'Invalid permissions for this action');
 
         $q = $request->input('q');
 
-        if (Str::of($q)->startsWith('@')) {
-            if (strlen($q) < 3) {
-                return [];
-            }
+        $cleanQuery = Str::of($q)->startsWith('@') ? Str::substr($q, 1) : $q;
+
+        if (strlen($cleanQuery) < 2) {
+            return [];
         }
 
         $blocked = UserFilter::whereFilterableType('App\Profile')
             ->whereFilterType('block')
             ->whereFilterableId($request->user()->profile_id)
-            ->pluck('user_id');
+            ->pluck('user_id')
+            ->push($request->user()->profile_id);
 
-        $blocked->push($request->user()->profile_id);
+        $currentUserId = $request->user()->profile_id;
+        $operator = config('database.default') === 'pgsql' ? 'ilike' : 'like';
 
-        $results = Profile::select('id', 'domain', 'username')
-            ->whereNotIn('id', $blocked)
-            ->where('username', 'like', '%'.$q.'%')
-            ->groupBy('id', 'domain')
+        $results = Profile::select([
+            'profiles.id',
+            'profiles.domain',
+            'profiles.username',
+            'profiles.followers_count',
+        ])
+            ->selectRaw('MAX(CASE WHEN followers.following_id IS NOT NULL THEN 1 ELSE 0 END) as is_followed')
+            ->leftJoin('followers', function ($join) use ($currentUserId) {
+                $join->on('followers.following_id', '=', 'profiles.id')
+                    ->where('followers.profile_id', '=', $currentUserId);
+            })
+            ->whereNotIn('profiles.id', $blocked)
+            ->where(function ($query) use ($cleanQuery, $operator) {
+                $query->where('profiles.username', $operator, $cleanQuery.'%')
+                    ->orWhere('profiles.username', $operator, '%'.$cleanQuery.'%');
+            })
+            ->groupBy('profiles.id', 'profiles.domain', 'profiles.username', 'profiles.followers_count')
+            ->orderByDesc('is_followed')
+            ->orderByDesc('profiles.followers_count')
+            ->orderBy('profiles.username')
             ->limit(15)
             ->get()
             ->map(function ($profile) {
                 $username = $profile->domain ? substr($profile->username, 1) : $profile->username;
 
                 return [
-                    'key' => '@'.str_limit($username, 30),
+                    'key' => '@'.Str::limit($username, 30),
                     'value' => $username,
+                    'is_followed' => (bool) $profile->is_followed,
                 ];
             });
 
@@ -542,6 +589,8 @@ class ComposeController extends Controller
                 case 'image/jpeg':
                 case 'image/png':
                 case 'image/webp':
+                case 'image/heic':
+                case 'image/avif':
                     ImageOptimize::dispatch($m)->onQueue('mmo');
                     break;
                 case 'video/mp4':
@@ -549,8 +598,8 @@ class ComposeController extends Controller
                     break;
                 default:
                     break;
-	        }
-		}
+            }
+        }
 
         abort_if(empty($attachments), 422);
 
@@ -562,6 +611,7 @@ class ComposeController extends Controller
 
         if ($place && is_array($place)) {
             $status->place_id = $place['id'];
+            PlaceService::clearStatusesByPlaceId($place['id']);
         }
 
         if ($request->filled('comments_disabled')) {
@@ -572,7 +622,7 @@ class ComposeController extends Controller
             $status->cw_summary = $request->input('spoiler_text');
         }
 
-        $defaultCaption = "";
+        $defaultCaption = '';
         $status->caption = strip_tags($request->input('caption')) ?? $defaultCaption;
         $status->rendered = $defaultCaption;
         $status->scope = 'draft';
@@ -634,13 +684,13 @@ class ComposeController extends Controller
                 });
         }
 
-        NewStatusPipeline::dispatch($status);
         Cache::forget('user:account:id:'.$profile->user_id);
         Cache::forget('_api:statuses:recent_9:'.$profile->id);
         Cache::forget('profile:status_count:'.$profile->id);
         Cache::forget('status:transformer:media:attachments:'.$status->id);
         Cache::forget('profile:embed:'.$status->profile_id);
         Cache::forget($limitKey);
+        NewStatusPipeline::dispatch($status);
 
         return $status->url();
     }
@@ -678,7 +728,7 @@ class ComposeController extends Controller
         $place = $request->input('place');
         $cw = $request->input('cw');
         $tagged = $request->input('tagged');
-        $defaultCaption = config_cache('database.default') === 'mysql' ? null : "";
+        $defaultCaption = config_cache('database.default') === 'mysql' ? null : '';
 
         if ($place && is_array($place)) {
             $status->place_id = $place['id'];
@@ -772,11 +822,18 @@ class ComposeController extends Controller
         $uid = $request->user()->id;
         abort_if($request->user()->has_roles && ! UserRoleService::can('can-post', $request->user()->id), 403, 'Invalid permissions for this action');
 
+        $types = config_cache('pixelfed.media_types');
+        if (str_contains($types, ',')) {
+            $types = explode(',', $types);
+        }
         $default = [
+            'allowed_media_types' => $types,
+            'max_caption_length' => (int) config_cache('pixelfed.max_caption_length'),
             'default_license' => 1,
             'media_descriptions' => false,
+            'max_file_size' => (int) config_cache('pixelfed.max_photo_size'),
             'max_media_attachments' => (int) config_cache('pixelfed.max_album_length'),
-            'max_altext_length' => config_cache('pixelfed.max_altext_length'),
+            'max_altext_length' => (int) config_cache('pixelfed.max_altext_length'),
         ];
         $settings = AccountService::settings($uid);
         if (isset($settings['other']) && isset($settings['other']['scope'])) {
@@ -785,7 +842,9 @@ class ComposeController extends Controller
             $settings['compose_settings'] = $s;
         }
 
-        return array_merge($default, $settings['compose_settings']);
+        $res = array_merge($default, $settings['compose_settings']);
+
+        return response()->json($res, 200, [], JSON_UNESCAPED_SLASHES);
     }
 
     public function createPoll(Request $request)

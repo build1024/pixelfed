@@ -99,7 +99,7 @@
 				})
 				.then(res => {
 					if(res && res.data.length) {
-						if(this.rangeIndex == 2 && res.data.length > 3) {
+						if(res.data.length > 3) {
 							this.feed = res.data;
 							this.loading = false;
 						} else {

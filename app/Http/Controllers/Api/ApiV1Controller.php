@@ -24,6 +24,7 @@ use App\Jobs\FollowPipeline\UnfollowPipeline;
 use App\Jobs\HomeFeedPipeline\FeedWarmCachePipeline;
 use App\Jobs\ImageOptimizePipeline\ImageOptimize;
 use App\Jobs\LikePipeline\LikePipeline;
+use App\Jobs\LikePipeline\UnlikePipeline;
 use App\Jobs\MediaPipeline\MediaDeletePipeline;
 use App\Jobs\MediaPipeline\MediaSyncLicensePipeline;
 use App\Jobs\NotificationPipeline\NotificationWarmUserCache;
@@ -58,6 +59,7 @@ use App\Services\NotificationService;
 use App\Services\PublicTimelineService;
 use App\Services\ReblogService;
 use App\Services\RelationshipService;
+use App\Services\SanitizeService;
 use App\Services\SnowflakeService;
 use App\Services\StatusService;
 use App\Services\UserFilterService;
@@ -87,7 +89,6 @@ use Illuminate\Support\Str;
 use Laravel\Passport\Passport;
 use League\Fractal;
 use League\Fractal\Serializer\ArraySerializer;
-use Purify;
 use Storage;
 
 class ApiV1Controller extends Controller
@@ -217,6 +218,52 @@ class ApiV1Controller extends Controller
 
         $withInstanceMeta = $request->has('_wim');
         $res = $request->has(self::PF_API_ENTITY_KEY) ? AccountService::get($id, true) : AccountService::getMastodon($id, true);
+        if (! $res) {
+            return response()->json(['error' => 'Record not found'], 404);
+        }
+        if ($res && strpos($res['acct'], '@') != -1) {
+            $domain = parse_url($res['url'], PHP_URL_HOST);
+            abort_if(in_array($domain, InstanceService::getBannedDomains()), 404);
+        }
+
+        return $this->json($res);
+    }
+
+    /**
+     * GET /api/v1/accounts/lookup
+     *
+     * @param  string  $acct
+     * @return \App\Transformer\Api\AccountTransformer
+     */
+    public function accountLookupById(Request $request)
+    {
+        $request->validate([
+            'acct' => 'required|string|min:3|max:100',
+        ]);
+
+        $acct = $request->acct;
+
+        if (str_contains($acct, '@')) {
+            $count = mb_substr_count($acct, '@');
+
+            if ($count === 1) {
+                if (str_starts_with($acct, '@')) {
+                    $acct = substr($acct, 1);
+                } else {
+                    $acct = '@'.$acct;
+                }
+            }
+            if ($count > 2) {
+                return $this->json(['error' => 'Record not found'], 400);
+            }
+        }
+        $profile = Profile::whereUsername($acct)->first();
+
+        if (! $profile) {
+            return $this->json(['error' => 'Record not found'], 400);
+        }
+
+        $res = $request->has(self::PF_API_ENTITY_KEY) ? AccountService::get($profile->id, true) : AccountService::getMastodon($profile->id, true);
         if (! $res) {
             return response()->json(['error' => 'Record not found'], 404);
         }
@@ -497,10 +544,18 @@ class ApiV1Controller extends Controller
         $pid = $request->user()->profile_id;
         $this->validate($request, [
             'limit' => 'sometimes|integer|min:1',
+            'max_id' => 'nullable|integer|min:0|max:'.PHP_INT_MAX,
+            'min_id' => 'nullable|integer|min:0|max:'.PHP_INT_MAX,
         ]);
         $limit = $request->input('limit', 10);
         if ($limit > 80) {
             $limit = 80;
+        }
+        $max_id = $request->max_id;
+        $min_id = $request->min_id;
+
+        if (! $max_id && ! $min_id) {
+            $min_id = 1;
         }
         $napi = $request->has(self::PF_API_ENTITY_KEY);
 
@@ -527,10 +582,13 @@ class ApiV1Controller extends Controller
                 }
             }
         }
+        $dir = $min_id ? '>' : '<';
+        $id = $min_id ?? $max_id;
         if ($request->has('page')) {
             $res = DB::table('followers')
                 ->select('id', 'profile_id', 'following_id')
                 ->whereFollowingId($account['id'])
+                ->where('id', $dir, $id)
                 ->orderByDesc('id')
                 ->simplePaginate($limit)
                 ->map(function ($follower) use ($napi) {
@@ -548,6 +606,7 @@ class ApiV1Controller extends Controller
         $paginator = DB::table('followers')
             ->select('id', 'profile_id', 'following_id')
             ->whereFollowingId($account['id'])
+            ->where('id', $dir, $id)
             ->orderByDesc('id')
             ->cursorPaginate($limit)
             ->withQueryString();
@@ -599,11 +658,20 @@ class ApiV1Controller extends Controller
         $pid = $request->user()->profile_id;
         $this->validate($request, [
             'limit' => 'sometimes|integer|min:1',
+            'max_id' => 'nullable|integer|min:0|max:'.PHP_INT_MAX,
+            'min_id' => 'nullable|integer|min:0|max:'.PHP_INT_MAX,
         ]);
         $limit = $request->input('limit', 10);
         if ($limit > 80) {
             $limit = 80;
         }
+        $max_id = $request->max_id;
+        $min_id = $request->min_id;
+
+        if (! $max_id && ! $min_id) {
+            $min_id = 1;
+        }
+
         $napi = $request->has(self::PF_API_ENTITY_KEY);
 
         if ($account && strpos($account['acct'], '@') != -1) {
@@ -630,10 +698,13 @@ class ApiV1Controller extends Controller
             }
         }
 
+        $dir = $min_id ? '>' : '<';
+        $id = $min_id ?? $max_id;
         if ($request->has('page')) {
             $res = DB::table('followers')
                 ->select('id', 'profile_id', 'following_id')
                 ->whereProfileId($account['id'])
+                ->where('id', $dir, $id)
                 ->orderByDesc('id')
                 ->simplePaginate($limit)
                 ->map(function ($follower) use ($napi) {
@@ -651,6 +722,7 @@ class ApiV1Controller extends Controller
         $paginator = DB::table('followers')
             ->select('id', 'profile_id', 'following_id')
             ->whereProfileId($account['id'])
+            ->where('id', $dir, $id)
             ->orderByDesc('id')
             ->cursorPaginate($limit)
             ->withQueryString();
@@ -1392,7 +1464,6 @@ class ApiV1Controller extends Controller
         $status = $napi ? StatusService::get($id, false) : StatusService::getMastodon($id, false);
 
         abort_unless($status, 404);
-
         abort_if(isset($status['moved'], $status['moved']['id']), 422, 'Cannot like a post from an account that has migrated');
 
         if ($status && isset($status['account'], $status['account']['acct']) && strpos($status['account']['acct'], '@') != -1) {
@@ -1424,23 +1495,48 @@ class ApiV1Controller extends Controller
             abort(422);
         }
 
-        $like = Like::firstOrCreate([
-            'profile_id' => $user->profile_id,
-            'status_id' => $status['id'],
-        ]);
+        $like = DB::transaction(function () use ($user, $status, $spid) {
+            $statusModel = Status::lockForUpdate()->find($status['id']);
 
-        if ($like->wasRecentlyCreated == true) {
-            $like->status_profile_id = $spid;
-            $like->is_comment = ! empty($status['in_reply_to_id']);
-            $like->save();
-            Status::findOrFail($status['id'])->update([
-                'likes_count' => ($status['favourites_count'] ?? 0) + 1,
-            ]);
-            LikePipeline::dispatch($like)->onQueue('feed');
+            if (! $statusModel) {
+                abort(404, 'Status not found');
+            }
+
+            $like = Like::firstOrCreate(
+                [
+                    'profile_id' => $user->profile_id,
+                    'status_id' => $status['id'],
+                ],
+                [
+                    'status_profile_id' => $spid,
+                    'is_comment' => ! empty($status['in_reply_to_id']),
+                ]
+            );
+
+            if ($like->wasRecentlyCreated) {
+                $statusModel->increment('likes_count');
+
+                DB::afterCommit(function () use ($like) {
+                    LikePipeline::dispatch($like)->onQueue('feed');
+                });
+            }
+
+            return $like;
+        });
+
+        StatusService::del($status['id']);
+        $freshStatus = $napi ? StatusService::get($id, false) : StatusService::getMastodon($id, false);
+
+        if ($freshStatus) {
+            $freshStatus['favourited'] = true;
+            $freshStatus['bookmarked'] = BookmarkService::get($user->profile_id, $status['id']);
+            $freshStatus['reblogged'] = ReblogService::get($user->profile_id, $status['id']);
+
+            return $this->json($freshStatus);
         }
 
         $status['favourited'] = true;
-        $status['favourites_count'] = $status['favourites_count'] + 1;
+        $status['favourites_count'] = ($status['favourites_count'] ?? 0) + ($like->wasRecentlyCreated ? 1 : 0);
         $status['bookmarked'] = BookmarkService::get($user->profile_id, $status['id']);
         $status['reblogged'] = ReblogService::get($user->profile_id, $status['id']);
 
@@ -1484,23 +1580,37 @@ class ApiV1Controller extends Controller
             }
         }
 
-        $like = Like::whereProfileId($user->profile_id)
-            ->whereStatusId($status['id'])
-            ->first();
+        $didUnlike = DB::transaction(function () use ($user, $status) {
+            $like = Like::with(['actor', 'status'])
+                ->lockForUpdate()
+                ->whereProfileId($user->profile_id)
+                ->whereStatusId($status['id'])
+                ->first();
 
-        if ($like) {
-            $like->forceDelete();
-            $ogStatus = Status::find($status['id']);
-            if ($ogStatus) {
-                $ogStatus->likes_count = $ogStatus->likes_count > 1 ? $ogStatus->likes_count - 1 : 0;
-                $ogStatus->save();
+            if (! $like) {
+                return false;
             }
-        }
+
+            DB::afterCommit(function () use ($like) {
+                UnlikePipeline::dispatch($like)->onQueue('feed');
+            });
+
+            return true;
+        });
 
         StatusService::del($status['id']);
+        $freshStatus = $napi ? StatusService::get($id, false) : StatusService::getMastodon($id, false);
+
+        if ($freshStatus) {
+            $freshStatus['favourited'] = false;
+            $freshStatus['bookmarked'] = BookmarkService::get($user->profile_id, $status['id']);
+            $freshStatus['reblogged'] = ReblogService::get($user->profile_id, $status['id']);
+
+            return $this->json($freshStatus);
+        }
 
         $status['favourited'] = false;
-        $status['favourites_count'] = isset($ogStatus) ? $ogStatus->likes_count : $status['favourites_count'] - 1;
+        $status['favourites_count'] = max(0, ($status['favourites_count'] ?? 0) - ($didUnlike ? 1 : 0));
         $status['bookmarked'] = BookmarkService::get($user->profile_id, $status['id']);
         $status['reblogged'] = ReblogService::get($user->profile_id, $status['id']);
 
@@ -1964,7 +2074,7 @@ class ApiV1Controller extends Controller
             'media:update:'.$user->id,
             10,
             function () use ($media, $request) {
-                $caption = Purify::clean($request->input('description'));
+                $caption = app(SanitizeService::class)->html($request->input('description'));
 
                 if ($caption != $media->caption) {
                     $media->caption = $caption;
@@ -2510,7 +2620,12 @@ class ApiV1Controller extends Controller
             $limit = 40;
         }
         $pid = $request->user()->profile_id;
-        $includeReblogs = $request->filled('include_reblogs') ? $request->boolean('include_reblogs') : false;
+        $userSettings = $request->user()->settings;
+        $other = $userSettings->other ?? [];
+
+        $userEnableReblogs = data_get($other, 'enable_reblogs', false);
+        $includeReblogs = $request->filled('include_reblogs') ? $request->boolean('include_reblogs') : $userEnableReblogs;
+
         $nullFields = $includeReblogs ?
         ['in_reply_to_id'] :
         ['in_reply_to_id', 'reblog_of_id'];

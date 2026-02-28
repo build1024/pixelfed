@@ -2,33 +2,36 @@
 
 namespace App\Jobs\VideoPipeline;
 
-use Illuminate\Bus\Queueable;
-use Illuminate\Queue\SerializesModels;
-use Illuminate\Queue\InteractsWithQueue;
-use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Foundation\Bus\Dispatchable;
-use Illuminate\Http\File;
-use Cache;
-use FFMpeg;
-use Storage;
-use App\Media;
 use App\Jobs\MediaPipeline\MediaStoragePipeline;
-use App\Util\Media\Blurhash;
+use App\Media;
 use App\Services\MediaService;
 use App\Services\StatusService;
-use Illuminate\Queue\Middleware\WithoutOverlapping;
+use App\Util\Media\Blurhash;
+use Cache;
+use FFMpeg;
+use Log;
+use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUniqueUntilProcessing;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
+use Illuminate\Queue\SerializesModels;
 
-class VideoThumbnail implements ShouldQueue, ShouldBeUniqueUntilProcessing
+class VideoThumbnail implements ShouldBeUniqueUntilProcessing, ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     protected $media;
 
     public $timeout = 900;
+
     public $tries = 3;
+
     public $maxExceptions = 1;
+
     public $failOnTimeout = true;
+
     public $deleteWhenMissingModels = true;
 
     /**
@@ -43,7 +46,7 @@ class VideoThumbnail implements ShouldQueue, ShouldBeUniqueUntilProcessing
      */
     public function uniqueId(): string
     {
-        return 'media:video-thumb:id-' . $this->media->id;
+        return 'media:video-thumb:id-'.$this->media->id;
     }
 
     /**
@@ -74,7 +77,7 @@ class VideoThumbnail implements ShouldQueue, ShouldBeUniqueUntilProcessing
     public function handle()
     {
         $media = $this->media;
-        if($media->mime != 'video/mp4') {
+        if ($media->mime != 'video/mp4') {
             return;
         }
         $base = $media->media_path;
@@ -87,33 +90,37 @@ class VideoThumbnail implements ShouldQueue, ShouldBeUniqueUntilProcessing
             $path[$i] = $t;
             $save = implode('/', $path);
             $video = FFMpeg::open($base)
-            ->getFrameFromSeconds(1)
-            ->export()
-            ->toDisk('local')
-            ->save($save);
+                ->getFrameFromSeconds(1)
+                ->export()
+                ->toDisk('local')
+                ->save($save);
 
             $media->thumbnail_path = $save;
             $media->save();
 
             $blurhash = Blurhash::generate($media);
-            if($blurhash) {
+            if ($blurhash) {
                 $media->blurhash = $blurhash;
                 $media->save();
             }
 
-            if(config('media.hls.enabled')) {
+            if (config('media.hls.enabled')) {
                 VideoHlsPipeline::dispatch($media)->onQueue('mmo');
             }
-        } catch (Exception $e) {
-            
+        } catch (\Exception $e) {
+            if (config('app.dev_log')) {
+                Log::error('Video thumbnail generation failed: '.$e->getMessage());
+            }
+
+            throw $e;
         }
 
-        if($media->status_id) {
-            Cache::forget('status:transformer:media:attachments:' . $media->status_id);
+        if ($media->status_id) {
+            Cache::forget('status:transformer:media:attachments:'.$media->status_id);
             MediaService::del($media->status_id);
-            Cache::forget('status:thumb:nsfw0' . $media->status_id);
-            Cache::forget('status:thumb:nsfw1' . $media->status_id);
-            Cache::forget('pf:services:sh:id:' . $media->status_id);
+            Cache::forget('status:thumb:nsfw0'.$media->status_id);
+            Cache::forget('status:thumb:nsfw1'.$media->status_id);
+            Cache::forget('pf:services:sh:id:'.$media->status_id);
             StatusService::del($media->status_id);
         }
 

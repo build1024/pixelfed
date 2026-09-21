@@ -31,15 +31,24 @@ Photo sharing the way it should be. Pixelfed lets your casual shots and creative
 </picture>
 </p>
 
+## Database Support (Please report any regressions)
+* MySQL 9+ is officially supported (Strict mode is not default).
+* MariaDB 11+ is officially supported (Strict mode is default).
+* PostgreSQL 14+ is best effort _as of writing_.
+
+Notice: We need to improve the ecosystem to test/validate the codebase to be database agnostic, but this will require considerable engineering effort. Thank you for your understanding.
+
 ## Official Documentation
 
 Documentation for Pixelfed can be found on the [Pixelfed documentation website](https://docs.pixelfed.org/).
 
-## Run on YunoHost
+## Host your own instance with
 
-[![Install on YunoHost](https://user-images.githubusercontent.com/42862428/139559471-9495f1e9-e7a4-49f1-9a4b-675ddcc510a2.png 'Install on YunoHost')](https://install-app.yunohost.org/?app=pixelfed)
+[![Install on YunoHost](https://user-images.githubusercontent.com/42862428/139559471-9495f1e9-e7a4-49f1-9a4b-675ddcc510a2.png "Install on YunoHost")](https://install-app.yunohost.org/?app=pixelfed)
 
-Pixelfed app for [YunoHost](https://yunohost.org 'YunoHost'). See [the package source code](https://github.com/YunoHost-Apps/pixelfed_ynh 'pixelfed_ynh repository on GitHub')
+Pixelfed app for [YunoHost](https://yunohost.org "YunoHost"). See [the package source code](https://github.com/YunoHost-Apps/pixelfed_ynh "pixelfed_ynh repository on GitHub")
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Pixelfed/)
 
 ## License
 
@@ -50,26 +59,20 @@ Pixelfed is open-sourced software licensed under the AGPL license.
 The ways you can communicate on the project are below. Before interacting, please
 read through the [Code Of Conduct](CODE_OF_CONDUCT.md).
 
-* Mastodon: [@pixelfed@mastodon.social](https://mastodon.social/@pixelfed)
-* E-mail: [hello@pixelfed.org](mailto:hello@pixelfed.org)
+-   Mastodon: [@pixelfed@mastodon.social](https://mastodon.social/@pixelfed)
+-   E-mail: [hello@pixelfed.org](mailto:hello@pixelfed.org)
 
 ## Pixelfed Sponsors
 
 We would like to extend our thanks to the following sponsors for funding Pixelfed development. If you are interested in becoming a sponsor, please visit the Pixelfed [Patreon Page](https://www.patreon.com/dansup/overview)
 
-- [NLnet Foundation](https://nlnet.nl) and [NGI0
-Discovery](https://nlnet.nl/discovery/), part of the [Next Generation
-Internet](https://ngi.eu) initiative.
+-   [NLnet Foundation](https://nlnet.nl) and [NGI0
+    Discovery](https://nlnet.nl/discovery/), part of the [Next Generation
+    Internet](https://ngi.eu) initiative.
 
 <p>This project is supported by:</p>
 <p>
   <a href="https://www.fastly.com/fast-forward">
     <img src="https://github.com/user-attachments/assets/f1499b1f-c05f-480a-a5d5-dbebcb0e20fd">
-  </a>
-</p>
-
-<p>
-  <a href="https://www.digitalocean.com/?utm_medium=opensource&utm_source=pixelfed">
-    <img src="https://opensource.nyc3.cdn.digitaloceanspaces.com/attribution/assets/SVG/DO_Logo_horizontal_blue.svg" width="201px">
   </a>
 </p>

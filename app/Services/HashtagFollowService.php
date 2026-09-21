@@ -2,7 +2,7 @@
 
 namespace App\Services;
 
-use App\HashtagFollow;
+use App\Models\HashtagFollow;
 use Illuminate\Support\Facades\Redis;
 
 class HashtagFollowService
@@ -62,7 +62,7 @@ class HashtagFollowService
 
     public static function isWarm($hid)
     {
-        return Redis::zcard(self::CACHE_KEY.$hid) > 0 || Redis::zscore(self::CACHE_WARMED, $hid) !== null;
+        return Redis::zcount(self::CACHE_KEY.$hid, 0, -1) ?? Redis::zscore(self::CACHE_WARMED, $hid) != null;
     }
 
     public static function setWarm($hid)

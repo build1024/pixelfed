@@ -2,17 +2,15 @@
 
 namespace App\Jobs\InboxPipeline;
 
-use App\Profile;
+use App\Models\Profile;
 use App\Util\ActivityPub\Helpers;
 use App\Util\ActivityPub\HttpSignature;
-use Cache;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
-use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Lottery;
 
 class InboxValidator implements ShouldQueue
@@ -89,7 +87,6 @@ class InboxValidator implements ShouldQueue
         } else {
             return;
         }
-
     }
 
     protected function verifySignature($headers, $profile, $payload)
@@ -104,8 +101,9 @@ class InboxValidator implements ShouldQueue
         if (! $date) {
             return false;
         }
-        if (! now()->parse($date)->gt(now()->subDays(1)) ||
-           ! now()->parse($date)->lt(now()->addDays(1))
+        if (
+            ! now()->parse($date)->gt(now()->subDays(1)) ||
+            ! now()->parse($date)->lt(now()->addDays(1))
         ) {
             return false;
         }
@@ -122,7 +120,9 @@ class InboxValidator implements ShouldQueue
         $id = Helpers::validateUrl($bodyDecoded['id']);
         $keyDomain = parse_url($keyId, PHP_URL_HOST);
         $idDomain = parse_url($id, PHP_URL_HOST);
-        if (isset($bodyDecoded['object'])
+        $actorDomain = parse_url($payload['actor'] ?? '', PHP_URL_HOST);
+        if (
+            isset($bodyDecoded['object'])
             && is_array($bodyDecoded['object'])
             && isset($bodyDecoded['object']['attributedTo'])
         ) {
@@ -138,7 +138,10 @@ class InboxValidator implements ShouldQueue
                 return false;
             }
         }
-        if (! $keyDomain || ! $idDomain || $keyDomain !== $idDomain) {
+        if (
+            ! $keyDomain || ! $idDomain || ! $actorDomain
+            || $keyDomain !== $idDomain || $keyDomain !== $actorDomain
+        ) {
             return false;
         }
         $actor = Profile::whereKeyId($keyId)->first();
@@ -147,6 +150,13 @@ class InboxValidator implements ShouldQueue
             $actor = Helpers::profileFirstOrNew($actorUrl);
         }
         if (! $actor) {
+            return false;
+        }
+        // Rebind: the profile resolved by keyId must belong to the keyId host.
+        // This rejects a poisoned or stale row whose remote_url host differs
+        // from the request's keyId host, so a planted key_id -> attacker key
+        // binding cannot authenticate.
+        if (parse_url($actor->remote_url, PHP_URL_HOST) !== $keyDomain) {
             return false;
         }
         $pkey = openssl_pkey_get_public($actor->public_key);
@@ -160,61 +170,5 @@ class InboxValidator implements ShouldQueue
         } else {
             return false;
         }
-    }
-
-    protected function blindKeyRotation($headers, $profile, $payload)
-    {
-        $signature = is_array($headers['signature']) ? $headers['signature'][0] : $headers['signature'];
-        $date = is_array($headers['date']) ? $headers['date'][0] : $headers['date'];
-        if (! $signature) {
-            return;
-        }
-        if (! $date) {
-            return;
-        }
-        if (! now()->parse($date)->gt(now()->subDays(1)) ||
-           ! now()->parse($date)->lt(now()->addDays(1))
-        ) {
-            return;
-        }
-        $signatureData = HttpSignature::parseSignatureHeader($signature);
-
-        if (! isset($signatureData['keyId'], $signatureData['signature'], $signatureData['headers']) || isset($signatureData['error'])) {
-            return;
-        }
-
-        $keyId = Helpers::validateUrl($signatureData['keyId']);
-        $actor = Profile::whereKeyId($keyId)->whereNotNull('remote_url')->first();
-        if (! $actor) {
-            return;
-        }
-        if (Helpers::validateUrl($actor->remote_url) == false) {
-            return;
-        }
-
-        try {
-            $res = Http::withOptions(['allow_redirects' => false])->timeout(20)->withHeaders([
-                'Accept' => 'application/ld+json; profile="https://www.w3.org/ns/activitystreams"',
-                'User-Agent' => 'PixelfedBot v0.1 - https://pixelfed.org',
-            ])->get($actor->remote_url);
-        } catch (ConnectionException $e) {
-            return false;
-        }
-
-        if (! $res->ok()) {
-            return false;
-        }
-
-        $res = json_decode($res->body(), true, 8);
-        if (! $res || empty($res) || ! isset($res['publicKey']) || ! isset($res['publicKey']['id'])) {
-            return;
-        }
-        if ($res['publicKey']['id'] !== $actor->key_id) {
-            return;
-        }
-        $actor->public_key = $res['publicKey']['publicKeyPem'];
-        $actor->save();
-
-        return $this->verifySignature($headers, $profile, $payload);
     }
 }

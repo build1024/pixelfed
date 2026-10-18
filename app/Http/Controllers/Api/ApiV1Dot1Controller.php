@@ -293,7 +293,7 @@ class ApiV1Dot1Controller extends Controller
     public function accountChangePassword(Request $request)
     {
         abort_if(! $request->user() || ! $request->user()->token(), 403);
-        abort_unless($request->user()->tokenCan('write'), 403);
+        abort_unless($request->user()->tokenCan('security:write'), 403);
 
         $user = $request->user();
         abort_if($user->status != null, 403);
@@ -305,19 +305,38 @@ class ApiV1Dot1Controller extends Controller
             'current_password' => 'bail|required|current_password',
             'new_password' => 'required|min:'.config('pixelfed.min_password_length', 8),
             'confirm_password' => 'required|same:new_password',
+            'revoke_other_sessions' => 'sometimes|boolean',
         ], [
-            'current_password' => 'The password you entered is incorrect',
+            'current_password.current_password' => 'The password you entered is incorrect',
         ]);
+
+        $revokeOthers = $request->boolean('revoke_other_sessions');
+        $currentId = $request->user()->token()->id;
 
         $user->password = bcrypt($request->input('new_password'));
         $user->save();
+
+        $revoked = 0;
+        if ($revokeOthers) {
+            $ids = $user->tokens()
+                ->whereKeyNot($currentId)
+                ->where('revoked', false)
+                ->pluck('id');
+
+            if ($ids->isNotEmpty()) {
+                $revoked = $user->tokens()->whereIn('id', $ids)->update(['revoked' => true]);
+                RefreshToken::whereIn('access_token_id', $ids)->update(['revoked' => true]);
+            }
+        }
 
         $log = new AccountLog;
         $log->user_id = $user->id;
         $log->item_id = $user->id;
         $log->item_type = User::class;
         $log->action = 'account.edit.password';
-        $log->message = 'Password changed';
+        $log->message = $revokeOthers
+            ? "Password changed, {$revoked} other session(s) signed out"
+            : 'Password changed';
         $log->link = null;
         $log->ip_address = $request->ip();
         $log->user_agent = $request->userAgent();
@@ -387,7 +406,7 @@ class ApiV1Dot1Controller extends Controller
     public function accountTwoFactor(Request $request)
     {
         abort_if(! $request->user() || ! $request->user()->token(), 403);
-        abort_unless($request->user()->tokenCan('read'), 403);
+        abort_unless($request->user()->tokenCan('security:read'), 403);
 
         $user = $request->user();
         abort_if($user->status != null, 403);
@@ -412,7 +431,7 @@ class ApiV1Dot1Controller extends Controller
     public function accountEmailsFromPixelfed(Request $request)
     {
         abort_if(! $request->user() || ! $request->user()->token(), 403);
-        abort_unless($request->user()->tokenCan('read'), 403);
+        abort_unless($request->user()->tokenCan('security:read'), 403);
 
         $user = $request->user();
         abort_if($user->status != null, 403);
@@ -489,7 +508,7 @@ class ApiV1Dot1Controller extends Controller
     public function accountApps(Request $request)
     {
         abort_if(! $request->user() || ! $request->user()->token(), 403);
-        abort_unless($request->user()->tokenCan('read'), 403);
+        abort_unless($request->user()->tokenCan('security:read'), 403);
 
         $user = $request->user();
         abort_if($user->status != null, 403);
@@ -498,19 +517,63 @@ class ApiV1Dot1Controller extends Controller
             abort_if(BouncerService::checkIp($request->ip()), 404);
         }
 
-        $res = $user->tokens->sortByDesc('created_at')->take(10)->map(function ($token, $key) use ($request) {
-            return [
-                'id' => $token->id,
-                'current_session' => $request->user()->token()->id == $token->id,
-                'name' => $token->client->name,
-                'scopes' => $token->scopes,
-                'revoked' => $token->revoked,
-                'created_at' => str_replace('@', 'at', now()->parse($token->created_at)->format('M j, Y @ g:i:s A')),
-                'expires_at' => str_replace('@', 'at', now()->parse($token->expires_at)->format('M j, Y @ g:i:s A')),
-            ];
-        });
+        $this->validate($request, [
+            'filter' => 'sometimes|in:active,revoked,all',
+            'limit' => 'sometimes|integer|min:1|max:40',
+            'cursor' => 'sometimes|string',
+        ]);
 
-        return $this->json($res);
+        $filter = $request->input('filter', 'all');
+        $limit = (int) $request->input('limit', 10);
+        $legacy = ! $request->has('filter');
+        $currentId = $request->user()->token()->id;
+
+        $query = $user->tokens()
+            ->with('client')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id');
+
+        if ($filter === 'active') {
+            $query->where('revoked', false)
+                ->where(function ($q) {
+                    $q->whereNull('expires_at')->orWhere('expires_at', '>', now());
+                });
+        } elseif ($filter === 'revoked') {
+            $query->where(function ($q) {
+                $q->where('revoked', true)->orWhere('expires_at', '<=', now());
+            });
+        }
+
+        $tokens = $query->cursorPaginate($limit)->withQueryString();
+
+        $res = collect($tokens->items())
+            ->map(fn ($token) => $this->appToken($token, $currentId, $legacy))
+            ->values();
+
+        $headers = [];
+        if ($tokens->hasMorePages()) {
+            $headers['Link'] = '<'.$tokens->nextPageUrl().'>; rel="next"';
+        }
+
+        return response()->json($res, 200, $headers, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+
+    protected function appToken($token, $currentId, $legacy = false)
+    {
+        $expired = $token->expires_at && $token->expires_at->isPast();
+        $status = $token->revoked ? 'revoked' : ($expired ? 'expired' : 'active');
+        $fmt = fn ($date) => $date ? str_replace('@', 'at', $date->format('M j, Y @ g:i:s A')) : null;
+
+        return [
+            'id' => $token->id,
+            'current_session' => $token->id === $currentId,
+            'name' => $token->client?->name ?? 'Unknown app',
+            'scopes' => $token->scopes ?? [],
+            'revoked' => (bool) $token->revoked,
+            'status' => $status,
+            'created_at' => $legacy ? $fmt($token->created_at) : $token->created_at?->toIso8601String(),
+            'expires_at' => $legacy ? $fmt($token->expires_at) : $token->expires_at?->toIso8601String(),
+        ];
     }
 
     /**
@@ -521,7 +584,7 @@ class ApiV1Dot1Controller extends Controller
     public function accountAppRevoke(Request $request, $id)
     {
         abort_if(! $request->user() || ! $request->user()->token(), 403);
-        abort_unless($request->user()->tokenCan('write'), 403);
+        abort_unless($request->user()->tokenCan('security:write'), 403);
 
         $user = $request->user();
         abort_if($user->status != null, 403);
@@ -530,13 +593,10 @@ class ApiV1Dot1Controller extends Controller
             abort_if(BouncerService::checkIp($request->ip()), 404);
         }
 
-        $token = $user->tokens()->whereKey($id)->first();
+        $currentId = $request->user()->token()->id;
+        $token = $user->tokens()->with('client')->whereKey($id)->first();
         abort_if(! $token, 404);
-        abort_if(
-            $token->id === $request->user()->token()->id,
-            422,
-            'You cannot revoke the current session. Sign out instead.'
-        );
+        abort_if($token->id === $currentId, 422, 'You cannot revoke the current session. Sign out instead.');
 
         if (! $token->revoked) {
             $token->revoke();
@@ -547,14 +607,14 @@ class ApiV1Dot1Controller extends Controller
             $log->item_id = $user->id;
             $log->item_type = User::class;
             $log->action = 'account.apps.revoke';
-            $log->message = 'Revoked app access: '.$token->client->name;
+            $log->message = 'Revoked app access: '.$token->client?->name;
             $log->link = null;
             $log->ip_address = $request->ip();
             $log->user_agent = $request->userAgent();
             $log->save();
         }
 
-        return $this->accountApps($request);
+        return $this->json($this->appToken($token, $currentId));
     }
 
     public function inAppRegistrationPreFlightCheck(Request $request): array

@@ -44,6 +44,7 @@ $middleware = ['auth:sanctum,api'];
 
 Route::post('/f/inbox', [FederationController::class, 'sharedInbox']);
 Route::post('/users/{username}/inbox', [FederationController::class, 'userInbox']);
+Route::get('/users/{username}/followers_synchronization', [FederationController::class, 'userFollowersSynchronization']);
 Route::get('i/actor', [InstanceActorController::class, 'profile']);
 Route::post('i/actor/inbox', [InstanceActorController::class, 'inbox']);
 Route::get('i/actor/outbox', [InstanceActorController::class, 'outbox']);
@@ -211,6 +212,7 @@ Route::prefix('api')->group(function () use ($middleware) {
         Route::get('tags/{id}', [TagsController::class, 'getHashtag'])->middleware($middleware);
 
         Route::get('statuses/{id}/history', [StatusEditController::class, 'history'])->middleware($middleware);
+        Route::put('statuses/{id}/interaction_policy', [StatusEditController::class, 'interactionPolicy'])->middleware($middleware);
         Route::put('statuses/{id}', [StatusEditController::class, 'store'])->middleware($middleware);
 
         Route::prefix('admin')->group(function () use ($middleware) {

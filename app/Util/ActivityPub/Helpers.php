@@ -15,9 +15,11 @@ use App\Models\Poll;
 use App\Models\Profile;
 use App\Models\Status;
 use App\Services\Account\AccountStatService;
+use App\Services\AccountService;
 use App\Services\ActivityPubDeliveryService;
 use App\Services\ActivityPubFetchService;
 use App\Services\DomainService;
+use App\Services\FollowersSyncService;
 use App\Services\InstanceService;
 use App\Services\MediaPathService;
 use App\Services\NetworkTimelineService;
@@ -34,19 +36,48 @@ use Purify;
 
 class Helpers
 {
-    private const PUBLIC_TIMELINE = 'https://www.w3.org/ns/activitystreams#Public';
+    private const string PUBLIC_TIMELINE = 'https://www.w3.org/ns/activitystreams#Public';
 
-    private const CACHE_TTL = 14440;
+    private const int CACHE_TTL = 14440;
 
-    private const URL_CACHE_PREFIX = 'helpers:url:';
+    private const string URL_CACHE_PREFIX = 'helpers:url:';
 
-    private const FETCH_CACHE_TTL = 15;
+    private const int FETCH_CACHE_TTL = 15;
 
-    private const MAX_URL_LENGTH = 4096;
+    /**
+     * Seconds a failed fetch is remembered. Kept short on purpose: a failed
+     * parent fetch used to be cached for the same 15 minutes as a success,
+     * which pinned every reply to that parent as unresolvable. Two minutes
+     * still absorbs a burst of activities pointing at the same dead URL.
+     * RemoteReplyResolvePipeline::BACKOFF must start above this value.
+     */
+    public const int FETCH_NEGATIVE_TTL = 120;
 
-    private const DNS_TTL_POSITIVE = 86400;
+    /**
+     * Outcomes of resolveReplyParent().
+     *
+     * NONE        the object is not a reply
+     * RESOLVED    the parent exists locally (it may have just been fetched)
+     * UNRESOLVED  the object is a reply but the parent could not be found or
+     *             fetched right now. Never store the object in this state,
+     *             it would become a top-level status. Retry later.
+     * REJECTED    the object is a reply we must not accept (blocked author,
+     *             blocked domain, comments disabled, malformed inReplyTo).
+     *             Never store, never retry.
+     */
+    public const string REPLY_PARENT_NONE = 'none';
 
-    private const DNS_TTL_NEGATIVE = 300;
+    public const string REPLY_PARENT_RESOLVED = 'resolved';
+
+    public const string REPLY_PARENT_UNRESOLVED = 'unresolved';
+
+    public const string REPLY_PARENT_REJECTED = 'rejected';
+
+    private const int MAX_URL_LENGTH = 4096;
+
+    private const int DNS_TTL_POSITIVE = 86400;
+
+    private const int DNS_TTL_NEGATIVE = 300;
 
     /**
      * Maximum number of ancestors a single status fetch may walk up an
@@ -55,9 +86,9 @@ class Helpers
      * fetch and one statuses row per hop. Anything deeper than this is not
      * rendered in the UI anyway.
      */
-    private const MAX_REPLY_DEPTH = 5;
+    private const int MAX_REPLY_DEPTH = 5;
 
-    private const LOCALHOST_DOMAINS = [
+    private const array LOCALHOST_DOMAINS = [
         'localhost',
         '127.0.0.1',
         '::1',
@@ -204,7 +235,7 @@ class Helpers
 
         try {
             $uri = $uri->withHost($host);
-        } catch (\Throwable $e) {
+        } catch (\Throwable) {
             return false;
         }
 
@@ -480,7 +511,7 @@ class Helpers
         $host = strtolower(rtrim($host, '.'));
 
         $bannedInstances = array_map(
-            fn ($domain) => strtolower(rtrim($domain, '.')),
+            fn ($domain): string => strtolower(rtrim($domain, '.')),
             InstanceService::getBannedDomains()
         );
 
@@ -528,22 +559,56 @@ class Helpers
             return;
         }
 
-        $hash = hash('sha256', $url);
-        $key = "helpers:url:fetcher:sha256-{$hash}";
-        $ttl = now()->addMinutes(15);
+        if (is_array($url)) {
+            $url = $url[0] ?? null;
+        }
 
-        return Cache::remember($key, $ttl, function () use ($url) {
-            $res = ActivityPubFetchService::get($url);
-            if (! $res || empty($res)) {
-                return false;
-            }
-            $res = json_decode($res, true, 8);
-            if (json_last_error() == JSON_ERROR_NONE) {
-                return $res;
-            } else {
-                return false;
-            }
-        });
+        if (! is_string($url)) {
+            return;
+        }
+
+        $key = self::fetchCacheKey($url);
+
+        $cached = Cache::get($key);
+
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        $res = self::fetchAndDecode($url);
+
+        // Successes and failures get different lifetimes, see FETCH_NEGATIVE_TTL.
+        Cache::put(
+            $key,
+            $res,
+            $res === false
+                ? self::FETCH_NEGATIVE_TTL
+                : now()->addMinutes(self::FETCH_CACHE_TTL)
+        );
+
+        return $res;
+    }
+
+    public static function fetchCacheKey(string $url): string
+    {
+        return 'helpers:url:fetcher:sha256-'.hash('sha256', $url);
+    }
+
+    private static function fetchAndDecode(string $url): array|false
+    {
+        $res = ActivityPubFetchService::get($url);
+
+        if (! $res || empty($res)) {
+            return false;
+        }
+
+        $res = json_decode($res, true, 8);
+
+        if (json_last_error() !== JSON_ERROR_NONE || ! is_array($res)) {
+            return false;
+        }
+
+        return $res;
     }
 
     public static function fetchProfileFromUrl($url)
@@ -575,7 +640,7 @@ class Helpers
             $isMoreThanOneDayFuture = $date->gt($tomorrow);
 
             return ! ($isMoreThanTenYearsOld || $isMoreThanOneDayFuture);
-        } catch (\Exception $e) {
+        } catch (\Exception) {
             return false;
         }
     }
@@ -598,6 +663,15 @@ class Helpers
             return $status;
         }
 
+        // A local URL we cannot map to a row is a deleted, archived or
+        // unknown status. There is nothing to fetch, and fetching our own
+        // domain would store a remote copy of a local status.
+        $host = parse_url($url, PHP_URL_HOST);
+
+        if (is_string($host) && self::isLocalDomain($host)) {
+            return null;
+        }
+
         // Bound how far up an inReplyTo chain a single fetch may walk.
         // Checked after the DB lookup so a reply to an already-known
         // status still links even at the limit, but we never fetch past it.
@@ -608,6 +682,87 @@ class Helpers
         return self::createStatusFromUrl($url, $replyTo, $depth);
     }
 
+    private static function matchPathTemplate(
+        string $path,
+        string $template,
+        array $constraints = []
+    ): ?array {
+        $path = '/'.trim($path, '/');
+        $template = '/'.trim($template, '/');
+
+        $offset = 0;
+        $pattern = '';
+
+        preg_match_all(
+            '/\{([a-zA-Z][a-zA-Z0-9_]*)\}/',
+            $template,
+            $placeholders,
+            PREG_OFFSET_CAPTURE
+        );
+
+        foreach ($placeholders[0] as $index => [$placeholder, $position]) {
+            $name = $placeholders[1][$index][0];
+
+            $literal = substr(
+                $template,
+                $offset,
+                $position - $offset
+            );
+
+            $pattern .= preg_quote($literal, '#');
+
+            $constraint = $constraints[$name] ?? '[^/]+';
+
+            $pattern .= '(?P<'.$name.'>'.$constraint.')';
+
+            $offset = $position + strlen($placeholder);
+        }
+
+        $pattern .= preg_quote(
+            substr($template, $offset),
+            '#'
+        );
+
+        if (! preg_match('#^'.$pattern.'/?$#', $path, $matches)) {
+            return null;
+        }
+
+        return collect($matches)
+            ->filter(fn ($value, $key) => is_string($key))
+            ->all();
+    }
+
+    private static function extractLocalStatusId(string $url): ?int
+    {
+        $path = parse_url($url, PHP_URL_PATH);
+
+        if (! is_string($path) || $path === '') {
+            return null;
+        }
+
+        $templates = [
+            '/p/{username}/{id}',
+            '/p/{username}/{id}/activity',
+        ];
+
+        foreach ($templates as $template) {
+            $match = self::matchPathTemplate(
+                $path,
+                $template,
+                [
+                    'username' => '[A-Za-z0-9._-]+',
+                    'id' => '\d+',
+                ]
+            );
+
+            if ($match !== null) {
+                return (int) $match['id'];
+            }
+        }
+
+        return null;
+    }
+
     /**
      * Find existing status by URL
      */
@@ -615,11 +770,19 @@ class Helpers
     {
         $host = parse_url($url, PHP_URL_HOST);
 
+        if (! is_string($host) || $host === '') {
+            return null;
+        }
+
         if (self::isLocalDomain($host)) {
-            $id = (int) last(explode('/', $url));
+            $id = self::extractLocalStatusId($url);
+
+            if ($id === null) {
+                return null;
+            }
 
             return Status::whereNotIn('scope', ['draft', 'archived'])
-                ->findOrFail($id);
+                ->find($id);
         }
 
         return Status::whereNotIn('scope', ['draft', 'archived'])
@@ -633,8 +796,11 @@ class Helpers
     /**
      * Create a new status from ActivityPub data
      */
-    public static function createStatusFromUrl(string $url, bool $replyTo, int $depth = 0): ?Status
-    {
+    public static function createStatusFromUrl(
+        string $url,
+        bool $replyTo,
+        int $depth = 0
+    ): ?Status {
         $res = self::fetchFromUrl($url);
 
         if (! $res || ! self::isValidStatusData($res)) {
@@ -649,7 +815,8 @@ class Helpers
             return null;
         }
 
-        $activity = isset($res['object']) ? $res : ['object' => $res];
+        $object = self::statusObject($res);
+        $activity = ['object' => $object];
 
         if (! $profile = self::getStatusProfile($activity)) {
             return null;
@@ -659,24 +826,38 @@ class Helpers
             return null;
         }
 
-        $reply_to = self::getReplyToId($activity, $profile, $replyTo, $depth);
-        $scope = self::getScope($activity, $url);
-        $cw = self::getSensitive($activity, $url);
+        $scope = self::getScope($object, $url);
+        $cw = self::getSensitive($object, $url);
 
-        if ($res['type'] === 'Question') {
+        if (($object['type'] ?? null) === 'Question') {
+            $resolution = self::resolveReplyParent(
+                $activity,
+                $profile,
+                $depth
+            );
+
+            if (! self::replyParentAllowsStore($resolution)) {
+                return null;
+            }
+
             return self::storePoll(
                 $profile,
-                $res,
+                $object,
                 $url,
-                $res['published'],
-                $reply_to,
+                $object['published'] ?? $res['published'],
+                $resolution['status']?->id,
                 $cw,
                 $scope,
-                $activity['id'] ?? $url
+                $object['id'] ?? $url
             );
         }
 
-        return self::storeStatus($url, $profile, $res, $depth);
+        return self::storeStatus(
+            $url,
+            $profile,
+            $object,
+            $depth
+        );
     }
 
     /**
@@ -743,7 +924,7 @@ class Helpers
 
         if (is_array($attributedTo)) {
             return collect($attributedTo)
-                ->filter(fn ($o) => $o && isset($o['type']) && $o['type'] == 'Person')
+                ->filter(fn ($o): bool => $o && isset($o['type']) && $o['type'] == 'Person')
                 ->pluck('id')
                 ->first();
         }
@@ -825,40 +1006,177 @@ class Helpers
     }
 
     /**
+     * Resolve the parent of a reply.
+     *
+     * Resolves (and fetches if needed) the status referenced by
+     * object.inReplyTo, one hop deeper than the caller, and reports why when
+     * it cannot. "This is not a reply" and "this is a reply whose parent we
+     * could not get" are different answers: only the first may be stored
+     * without in_reply_to_id.
+     *
+     * @return array{state: string, status: ?Status}
+     */
+    public static function resolveReplyParent(
+        array $activity,
+        Profile $profile,
+        int $depth = 0
+    ): array {
+        $object = self::statusObject($activity);
+
+        $raw = $object['inReplyTo'] ?? null;
+
+        if ($raw === null || $raw === '' || $raw === []) {
+            return self::replyParentResult(self::REPLY_PARENT_NONE);
+        }
+
+        $inReplyTo = self::extractInReplyTo($raw);
+
+        if ($inReplyTo === null) {
+            // Declared as a reply, but to nothing we can address.
+            return self::replyParentResult(self::REPLY_PARENT_REJECTED);
+        }
+
+        $parent = self::statusFirstOrFetch(
+            $inReplyTo,
+            false,
+            $depth + 1
+        );
+
+        if (! $parent) {
+            return self::replyParentResult(self::REPLY_PARENT_UNRESOLVED);
+        }
+
+        if (self::parentRefusesReplyFrom($parent, $profile)) {
+            return self::replyParentResult(self::REPLY_PARENT_REJECTED);
+        }
+
+        return self::replyParentResult(self::REPLY_PARENT_RESOLVED, $parent);
+    }
+
+    /**
+     * @return array{state: string, status: ?Status}
+     */
+    private static function replyParentResult(string $state, ?Status $status = null): array
+    {
+        return ['state' => $state, 'status' => $status];
+    }
+
+    /**
+     * Whether an object with this resolution may be written to the database.
+     *
+     * @param  array{state: string, status: ?Status}  $resolution
+     */
+    public static function replyParentAllowsStore(array $resolution): bool
+    {
+        return in_array($resolution['state'], [
+            self::REPLY_PARENT_NONE,
+            self::REPLY_PARENT_RESOLVED,
+        ], true);
+    }
+
+    /**
+     * Pull a single URL out of an inReplyTo value. JSON-LD allows a string,
+     * a list, an embedded object, or a Link.
+     */
+    private static function extractInReplyTo(mixed $value): ?string
+    {
+        if (is_string($value)) {
+            $value = trim($value);
+
+            return $value !== '' ? $value : null;
+        }
+
+        if (! is_array($value) || $value === []) {
+            return null;
+        }
+
+        if (array_is_list($value)) {
+            return self::extractInReplyTo($value[0]);
+        }
+
+        foreach (['id', 'href'] as $key) {
+            if (isset($value[$key]) && is_string($value[$key]) && trim($value[$key]) !== '') {
+                return trim($value[$key]);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether the parent's author has opted out of replies from this profile.
+     *
+     * Ids are compared as strings: UserFilterService returns them from Redis
+     * as strings while model keys are integers, so a strict in_array() on the
+     * raw values never matches.
+     */
+    private static function parentRefusesReplyFrom(Status $parent, Profile $profile): bool
+    {
+        if ((string) $parent->profile_id === (string) $profile->id) {
+            return false;
+        }
+
+        $blocks = array_map(
+            'strval',
+            (array) UserFilterService::blocks((int) $parent->profile_id)
+        );
+
+        if (in_array((string) $profile->id, $blocks, true)) {
+            return true;
+        }
+
+        // Domain blocks and the comments toggle only exist for local authors.
+        // For a remote parent the origin server is the authority.
+        if (! empty($parent->uri)) {
+            return false;
+        }
+
+        if ($parent->comments_disabled) {
+            return true;
+        }
+
+        return $profile->domain !== null &&
+            AccountService::blocksDomain($parent->profile_id, $profile->domain) === true;
+    }
+
+    /**
      * Get reply-to status ID
      *
-     * Resolves (and fetches if needed) the parent referenced by
-     * object.inReplyTo, one hop deeper than the caller.
+     * Kept for callers that only need the id. It cannot tell "not a reply"
+     * from "parent unavailable", so nothing that stores a status should use
+     * it. Use resolveReplyParent().
      */
-    public static function getReplyToId(array $activity, Profile $profile, bool $replyTo, int $depth = 0): ?int
-    {
-        $inReplyTo = self::pluckval($activity['object']['inReplyTo'] ?? null);
-
-        if (! is_string($inReplyTo) || $inReplyTo === '') {
-            return null;
-        }
-
-        $reply = self::statusFirstOrFetch($inReplyTo, false, $depth + 1);
-
-        if (! $reply) {
-            return null;
-        }
-
-        $blocks = UserFilterService::blocks($reply->profile_id);
-
-        return in_array($profile->id, $blocks) ? null : $reply->id;
+    public static function getReplyToId(
+        array $activity,
+        Profile $profile,
+        bool $replyTo = false,
+        int $depth = 0
+    ): ?int {
+        return self::resolveReplyParent($activity, $profile, $depth)['status']?->id;
     }
 
     /**
      * Store a new regular status
+     *
+     * Returns null, and writes nothing, when the object is a reply whose
+     * parent is unresolved or refuses it. A reply is never stored without
+     * in_reply_to_id. Inbox deliveries that want a retry should check
+     * resolveReplyParent() first, see HandlesCreates::handleNoteReply().
      */
-    public static function storeStatus(string $url, Profile $profile, array $activity, int $depth = 0): Status
-    {
-        $id = self::getStatusId($activity, $url);
-        $url = self::getStatusUrl($activity, $id);
+    public static function storeStatus(
+        string $url,
+        Profile $profile,
+        array $activity,
+        int $depth = 0
+    ): ?Status {
+        $object = self::statusObject($activity);
 
-        if ((! isset($activity['type']) ||
-                in_array($activity['type'], ['Create', 'Note'])) &&
+        $id = self::getStatusId($object, $url);
+        $url = self::getStatusUrl($object, $id);
+
+        if (
+            (! isset($object['type']) ||
+                in_array($object['type'], ['Create', 'Note'], true)) &&
             ! self::validateStatusDomains($id, $url)
         ) {
             throw new \Exception(json_encode([
@@ -872,36 +1190,97 @@ class Helpers
                     'url_valid_url' => self::validateUrl($url),
                 ],
                 'expected' => 'id host and url host to be valid and match (case-insensitive)',
-                'payload' => $activity,
+                'payload' => $object,
             ]));
         }
 
-        $reply_to = self::getReplyTo($activity, $depth);
-        $ts = self::pluckval($activity['published']);
-        $scope = self::getScope($activity, $url);
-        $commentsDisabled = isset($activity['commentsEnabled']) ? (bool) $activity['commentsEnabled'] == false : false;
-        $cw = self::getSensitive($activity, $url);
+        $resolution = self::resolveReplyParent(
+            ['object' => $object],
+            $profile,
+            $depth
+        );
+
+        if (! self::replyParentAllowsStore($resolution)) {
+            return null;
+        }
+
+        $parent = $resolution['status'];
+        $replyTo = $parent?->id;
+
+        $published = self::pluckval(
+            $object['published']
+                ?? $activity['published']
+                ?? null
+        );
+
+        if (! is_string($published) || $published === '') {
+            throw new \Exception('Missing ActivityPub published timestamp');
+        }
+
+        $scope = self::getScope($object, $url);
+
+        $commentsDisabled =
+            isset($object['commentsEnabled']) &&
+            (bool) $object['commentsEnabled'] === false;
+
+        $cw = self::getSensitive($object, $url);
 
         if ($profile->unlisted) {
             $scope = 'unlisted';
         }
 
-        $status = self::createOrUpdateStatus($url, $profile, $id, $activity, $ts, $reply_to, $cw, $scope, $commentsDisabled);
+        $status = self::createOrUpdateStatus(
+            $url,
+            $profile,
+            $id,
+            $object,
+            $published,
+            $replyTo,
+            $cw,
+            $scope,
+            $commentsDisabled,
+            $parent?->profile_id
+        );
 
-        if ($reply_to === null) {
-            self::importNoteAttachment($activity, $status);
+        if (! $status) {
+            return null;
+        }
+
+        // False when another worker stored this status first, or when this
+        // is a refresh of a known status. Counters, notifications and feed
+        // fan-out must only run once per status.
+        $isNew = $status->wasRecentlyCreated;
+
+        if ($replyTo === null) {
+            self::importNoteAttachment($object, $status);
         } else {
-            if (isset($activity['attachment']) && ! empty($activity['attachment'])) {
-                self::importNoteAttachment($activity, $status);
+            if (
+                isset($object['attachment']) &&
+                ! empty($object['attachment'])
+            ) {
+                self::importNoteAttachment($object, $status);
             }
-            StatusReplyPipeline::dispatch($status);
+
+            if ($isNew) {
+                StatusReplyPipeline::dispatch($status);
+            }
         }
 
-        if (isset($activity['tag']) && is_array($activity['tag']) && ! empty($activity['tag'])) {
-            StatusTagsPipeline::dispatch($activity, $status);
+        if (
+            isset($object['tag']) &&
+            is_array($object['tag']) &&
+            ! empty($object['tag'])
+        ) {
+            StatusTagsPipeline::dispatch($object, $status);
         }
 
-        self::handleStatusPostProcessing($status, $profile->id, $url);
+        if ($isNew) {
+            self::handleStatusPostProcessing(
+                $status,
+                $profile->id,
+                $url
+            );
+        }
 
         return $status;
     }
@@ -941,8 +1320,23 @@ class Helpers
         return $idDomain && $urlDomain && strtolower($idDomain) === strtolower($urlDomain);
     }
 
+    private static function statusObject(array $payload): array
+    {
+        if (
+            isset($payload['object']) &&
+            is_array($payload['object'])
+        ) {
+            return $payload['object'];
+        }
+
+        return $payload;
+    }
+
     /**
      * Create or update status record
+     *
+     * Returns null when the status exists but was deleted locally, or when
+     * its uri or object_url is already held by another profile.
      */
     public static function createOrUpdateStatus(
         string $url,
@@ -953,8 +1347,9 @@ class Helpers
         ?int $reply_to,
         bool $cw,
         string $scope,
-        bool $commentsDisabled
-    ): Status {
+        bool $commentsDisabled,
+        ?int $replyToProfileId = null
+    ): ?Status {
         $caption = isset($activity['content']) ?
             app(SanitizeService::class)->html($activity['content']) :
             '';
@@ -962,24 +1357,48 @@ class Helpers
             app(SanitizeService::class)->html($activity['summary']) :
             null;
 
-        return Status::updateOrCreate(
-            ['uri' => $url],
-            [
-                'profile_id' => $profile->id,
-                'url' => $url,
-                'object_url' => $id,
-                'caption' => strip_tags($caption),
-                'rendered' => $caption,
-                'created_at' => Carbon::parse($ts)->tz('UTC'),
-                'in_reply_to_id' => $reply_to,
-                'local' => false,
-                'is_nsfw' => $cw,
-                'scope' => $scope,
-                'visibility' => $scope,
-                'cw_summary' => $cwSummary ? strip_tags($cwSummary) : null,
-                'comments_disabled' => $commentsDisabled,
-            ]
-        );
+        $attributes = [
+            'profile_id' => $profile->id,
+            'url' => $url,
+            'object_url' => $id,
+            'caption' => strip_tags($caption),
+            'rendered' => $caption,
+            'created_at' => Carbon::parse($ts)->tz('UTC'),
+            'in_reply_to_id' => $reply_to,
+            'in_reply_to_profile_id' => $reply_to ? $replyToProfileId : null,
+            'local' => false,
+            'is_nsfw' => $cw,
+            'scope' => $scope,
+            'visibility' => $scope,
+            'cw_summary' => $cwSummary ? strip_tags($cwSummary) : null,
+            'comments_disabled' => $commentsDisabled,
+        ];
+
+        try {
+            return Status::updateOrCreate(['uri' => $url], $attributes);
+        } catch (UniqueConstraintViolationException) {
+            // uri and object_url are both unique. We land here when another
+            // worker inserted the same status between updateOrCreate's
+            // select and insert (two replies to one unknown parent arriving
+            // together), or when the row exists but is soft deleted.
+            // Returning the winner keeps the rest of the reply chain alive
+            // instead of failing the whole job. A soft deleted row means the
+            // status was removed and must not come back.
+            $existing = Status::withTrashed()
+                ->where(function ($query) use ($url, $id) {
+                    $query->where('uri', $url)
+                        ->orWhere('object_url', $id);
+                })
+                ->first();
+
+            // Only hand back a row by the same author. A row that holds this
+            // uri or object_url under another profile is not this status.
+            return $existing &&
+                ! $existing->trashed() &&
+                (string) $existing->profile_id === (string) $profile->id
+                ? $existing
+                : null;
+        }
     }
 
     /**
@@ -989,7 +1408,8 @@ class Helpers
     {
         if (
             config('instance.timeline.network.cached') &&
-            self::isEligibleForNetwork($status)
+            self::isEligibleForNetwork($status) &&
+            ! FeedInsertRemotePipeline::isTooOld($status->created_at)
         ) {
             $urlDomain = parse_url($url, PHP_URL_HOST);
             $filteredDomains = self::getFilteredDomains();
@@ -1068,14 +1488,14 @@ class Helpers
         return self::statusFirstOrFetch($inReplyTo, false, $depth + 1)?->id;
     }
 
-    public static function getScope($activity, $url)
+    public static function getScope($activity, $url): string
     {
         $id = isset($activity['id']) ? self::pluckval($activity['id']) : self::pluckval($url);
         $url = isset($activity['url']) ? self::pluckval($activity['url']) : self::pluckval($id);
         $urlDomain = parse_url(self::pluckval($url), PHP_URL_HOST);
         $scope = 'private';
 
-        if (isset($activity['to']) == true) {
+        if (isset($activity['to']) === true) {
             if (is_array($activity['to']) && in_array('https://www.w3.org/ns/activitystreams#Public', $activity['to'])) {
                 $scope = 'public';
             }
@@ -1084,7 +1504,7 @@ class Helpers
             }
         }
 
-        if (isset($activity['cc']) == true) {
+        if (isset($activity['cc']) === true) {
             if (is_array($activity['cc']) && in_array('https://www.w3.org/ns/activitystreams#Public', $activity['cc'])) {
                 $scope = 'unlisted';
             }
@@ -1093,7 +1513,7 @@ class Helpers
             }
         }
 
-        if ($scope == 'public' && in_array($urlDomain, InstanceService::getUnlistedDomains())) {
+        if ($scope === 'public' && in_array($urlDomain, InstanceService::getUnlistedDomains())) {
             $scope = 'unlisted';
         }
 
@@ -1103,7 +1523,7 @@ class Helpers
     public static function storePoll($profile, $res, $url, $ts, $reply_to, $cw, $scope, $id)
     {
         if (! isset($res['endTime']) || ! isset($res['oneOf']) || ! is_array($res['oneOf']) || count($res['oneOf']) > 4) {
-            return;
+            return null;
         }
 
         $options = collect($res['oneOf'])->map(function ($option) {
@@ -1126,7 +1546,7 @@ class Helpers
         $status->caption = $cleanedCaption ? strip_tags($cleanedCaption) : $defaultCaption;
         $status->rendered = Purify::clean($res['content'] ?? $defaultCaption);
         $status->created_at = Carbon::parse($ts)->tz('UTC');
-        $status->in_reply_to_id = null;
+        $status->in_reply_to_id = $reply_to;
         $status->local = false;
         $status->is_nsfw = $cw;
         $status->scope = 'draft';
@@ -1251,7 +1671,7 @@ class Helpers
 
         try {
             $mediaModel->save();
-        } catch (UniqueConstraintViolationException $e) {
+        } catch (UniqueConstraintViolationException) {
             // Lost a race with a concurrent inbox job that inserted the same
             // (status_id, media_path). Treat as already-imported.
             return null;
@@ -1628,6 +2048,7 @@ class Helpers
             'sharedInbox' => $res['endpoints']['sharedInbox'] ?? null,
             'inbox_url' => $res['inbox'],
             'outbox_url' => $res['outbox'] ?? null,
+            'followers_url' => FollowersSyncService::followersUrlFromActor($res),
             'public_key' => $res['publicKey']['publicKeyPem'],
             'indexable' => isset($res['indexable']) ? (bool) $res['indexable'] : false,
             'moved_to_profile_id' => $movedToPid,

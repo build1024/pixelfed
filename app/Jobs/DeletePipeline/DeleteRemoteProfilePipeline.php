@@ -16,6 +16,7 @@ use App\Models\Notification;
 use App\Models\Poll;
 use App\Models\PollVote;
 use App\Models\Profile;
+use App\Models\QuoteAuthorization;
 use App\Models\Report;
 use App\Models\Status;
 use App\Models\Story;
@@ -56,13 +57,13 @@ class DeleteRemoteProfilePipeline implements ShouldQueue
         if (! $profile) {
             Log::info('DeleteRemoteProfilePipeline: Profile no longer exists, skipping job');
 
-            return;
+            return null;
         }
 
         $pid = $profile->id;
 
         if ($profile->domain == null || $profile->private_key) {
-            return;
+            return null;
         }
 
         $profile->status = 'delete';
@@ -122,6 +123,9 @@ class DeleteRemoteProfilePipeline implements ShouldQueue
 
         // Delete mentions
         Mention::whereProfileId($pid)->forceDelete();
+
+        // Delete quote approval stamps issued to this actor
+        QuoteAuthorization::whereActorId($pid)->delete();
 
         // Delete notifications
         Notification::whereProfileId($pid)

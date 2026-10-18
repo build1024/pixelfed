@@ -7,10 +7,14 @@ use App\Jobs\InboxPipeline\InboxValidator;
 use App\Jobs\InboxPipeline\InboxWorker;
 use App\Models\FeatureAuthorization;
 use App\Models\Profile;
+use App\Models\QuoteAuthorization;
 use App\Models\Status;
 use App\Services\AccountService;
+use App\Services\ActivityPubSignedFetchService;
 use App\Services\FeaturedCollectionService;
+use App\Services\FollowersSyncService;
 use App\Services\InstanceService;
+use App\Services\QuoteService;
 use App\Util\Lexer\Nickname;
 use App\Util\Site\Nodeinfo;
 use App\Util\Webfinger\Webfinger;
@@ -104,16 +108,16 @@ class FederationController extends Controller
 
                 return response()->json($webfinger, 200, [], JSON_UNESCAPED_SLASHES)
                     ->header('Access-Control-Allow-Origin', '*');
-            } else {
-                return response('', 400);
             }
+
+            return response('', 400);
         }
         $hash = hash('sha256', $resource);
         $key = 'federation:webfinger:sha256:'.$hash;
         if ($cached = Cache::get($key)) {
             return response()->json($cached, 200, [], JSON_UNESCAPED_SLASHES);
         }
-        if (strpos($resource, $domain) == false) {
+        if (! str_contains($resource, $domain)) {
             return response('', 400);
         }
         $parsed = Nickname::normalizeProfileUrl($resource);
@@ -182,7 +186,6 @@ class FederationController extends Controller
         if (in_array($domain, InstanceService::getBannedDomains())) {
             return;
         }
-
         if (isset($obj['type']) && $obj['type'] === 'Delete') {
             if (isset($obj['object']) && isset($obj['object']['type']) && isset($obj['object']['id'])) {
                 if ($obj['object']['type'] === 'Person') {
@@ -209,7 +212,9 @@ class FederationController extends Controller
             }
 
             return;
-        } elseif (isset($obj['type']) && in_array($obj['type'], ['Follow', 'Accept'])) {
+        }
+
+        if (isset($obj['type']) && in_array($obj['type'], ['Follow', 'Accept'])) {
             dispatch(new InboxValidator($username, $headers, $payload))->onQueue('follow');
         } else {
             dispatch(new InboxValidator($username, $headers, $payload))->onQueue('high');
@@ -237,7 +242,6 @@ class FederationController extends Controller
         if (in_array($domain, InstanceService::getBannedDomains())) {
             return;
         }
-
         if (isset($obj['type']) && $obj['type'] === 'Delete') {
             if (isset($obj['object']) && isset($obj['object']['type']) && isset($obj['object']['id'])) {
                 if ($obj['object']['type'] === 'Person') {
@@ -264,7 +268,9 @@ class FederationController extends Controller
             }
 
             return;
-        } elseif (isset($obj['type']) && in_array($obj['type'], ['Follow', 'Accept'])) {
+        }
+
+        if (isset($obj['type']) && in_array($obj['type'], ['Follow', 'Accept'])) {
             dispatch(new InboxWorker($headers, $payload))->onQueue('follow');
         } else {
             dispatch(new InboxWorker($headers, $payload))->onQueue('shared');
@@ -306,6 +312,43 @@ class FederationController extends Controller
         return response()->json($obj)->header('Content-Type', 'application/activity+json');
     }
 
+    /**
+     * FEP-8fcf: partial followers collection of a local actor, limited to the
+     * followers hosted by the instance that signed the request.
+     */
+    public function userFollowersSynchronization(Request $request, $username): JsonResponse
+    {
+        abort_if(! (bool) config_cache('federation.activitypub.enabled'), 404);
+        abort_if(! FollowersSyncService::enabled(), 404);
+
+        $profile = Profile::whereNull('domain')
+            ->whereNull('status')
+            ->whereUsername($username)
+            ->first();
+        abort_if(! $profile, 404);
+
+        $signer = ActivityPubSignedFetchService::verify($request);
+        abort_if(! $signer, 401);
+
+        $authority = FollowersSyncService::authority($signer->remote_url);
+        abort_if(! $authority, 401);
+
+        $items = FollowersSyncService::partialFollowers($profile, $authority);
+
+        $res = [
+            '@context' => 'https://www.w3.org/ns/activitystreams',
+            'id' => $profile->permalink('/followers_synchronization'),
+            'type' => 'OrderedCollection',
+            'totalItems' => count($items),
+            'orderedItems' => $items,
+        ];
+
+        return response()
+            ->json($res, 200, [], JSON_UNESCAPED_SLASHES)
+            ->header('Content-Type', 'application/activity+json')
+            ->header('Cache-Control', 'private, no-store');
+    }
+
     public function userFeatureAuthorization(Request $request, $username, $id): JsonResponse
     {
         abort_if(! (bool) config_cache('federation.activitypub.enabled'), 404);
@@ -323,6 +366,33 @@ class FederationController extends Controller
 
         return response()
             ->json(FeaturedCollectionService::stampObject($auth), 200, [], JSON_UNESCAPED_SLASHES)
+            ->header('Content-Type', 'application/activity+json');
+    }
+
+    /**
+     * FEP-044f QuoteAuthorization stamp.
+     *
+     * Stamps are only ever issued for public and unlisted posts and carry
+     * nothing but ids, so they are publicly dereferenceable.
+     */
+    public function userQuoteAuthorization(Request $request, $username, $id): JsonResponse
+    {
+        abort_if(! (bool) config_cache('federation.activitypub.enabled'), 404);
+        abort_if(! ctype_digit((string) $id), 404);
+
+        $pid = AccountService::usernameToId($username);
+        abort_if(! $pid, 404);
+
+        $auth = QuoteAuthorization::with(['profile', 'status'])
+            ->whereProfileId($pid)
+            ->find((int) $id);
+
+        abort_if(! $auth || ! $auth->profile || $auth->profile->domain !== null, 404);
+        abort_if(! $auth->status || ! QuoteService::isQuotable($auth->status), 404);
+        abort_if($auth->isRevoked(), 410);
+
+        return response()
+            ->json(QuoteService::stampObject($auth), 200, [], JSON_UNESCAPED_SLASHES)
             ->header('Content-Type', 'application/activity+json');
     }
 }

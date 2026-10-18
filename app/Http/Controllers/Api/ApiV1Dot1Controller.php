@@ -14,6 +14,8 @@ use App\Jobs\VideoPipeline\VideoThumbnail;
 use App\Mail\ConfirmAppEmail;
 use App\Mail\PasswordChange;
 use App\Models\AccountLog;
+use App\Models\DmConversationParticipant;
+use App\Models\DmMessage;
 use App\Models\EmailVerification;
 use App\Models\Follower;
 use App\Models\Media;
@@ -56,6 +58,7 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Laravel\Passport\RefreshToken;
+use Laravel\Passport\Token;
 use League\Fractal;
 use League\Fractal\Serializer\ArraySerializer;
 
@@ -111,7 +114,7 @@ class ApiV1Dot1Controller extends Controller
         $validator = Validator::make($request->all(), [
             'report_type' => ['required', 'string', Rule::in(self::REPORT_TYPES)],
             'object_id' => ['required', 'integer', 'min:1'],
-            'object_type' => ['required', 'string', Rule::in(['post', 'user', 'story'])],
+            'object_type' => ['required', 'string', Rule::in(['post', 'user', 'story', 'direct_message'])],
             'message' => ['nullable', 'string'],
         ]);
 
@@ -129,8 +132,15 @@ class ApiV1Dot1Controller extends Controller
             return $this->error('Message is too long', 400, ['error_code' => 'ERROR_MESSAGE_TOO_LONG']);
         }
 
+        // Older clients report a direct message as a post, using the id the
+        // thread endpoint gave them
+        if ($objectType === 'post' && ! Status::whereKey($objectId)->exists()) {
+            $objectType = 'direct_message';
+        }
+
         [$object, $modelClass, $reportedProfileId] = match ($objectType) {
             'post' => [$post = Status::find($objectId), Status::class, $post?->profile_id],
+            'direct_message' => [$dm = $this->reportableDirectMessage($user->profile_id, $objectId), DmMessage::class, $dm?->profile_id],
             'user' => [$profile = Profile::find($objectId), Profile::class, $profile?->id],
             'story' => [$story = Story::whereActive(true)->find($objectId), Story::class, $story?->profile_id],
             default => [null, null, null],
@@ -181,6 +191,25 @@ class ApiV1Dot1Controller extends Controller
             'msg' => 'Successfully sent report',
             'code' => 200,
         ]);
+    }
+
+    /**
+     * A direct message can only be reported by someone who is in the
+     * conversation it was sent to.
+     */
+    protected function reportableDirectMessage(int $profileId, $messageId): ?DmMessage
+    {
+        $message = DmMessage::find($messageId);
+
+        if (! $message) {
+            return null;
+        }
+
+        $isParticipant = DmConversationParticipant::where('conversation_id', $message->conversation_id)
+            ->where('profile_id', $profileId)
+            ->exists();
+
+        return $isParticipant ? $message : null;
     }
 
     protected function sanitizeReportMessage(?string $message): string|false|null
@@ -349,44 +378,55 @@ class ApiV1Dot1Controller extends Controller
      */
     public function accountLoginActivity(Request $request)
     {
-        abort_if(! $request->user() || ! $request->user()->token(), 403);
-        abort_unless($request->user()->tokenCan('read'), 403);
-
         $user = $request->user();
-        abort_if($user->status != null, 403);
+
+        abort_if(! $user || ! $user->token(), 403);
+        abort_unless($user->tokenCan('read'), 403);
+        abort_if($user->status !== null, 403);
+
         if (config('pixelfed.bouncer.cloud_ips.ban_signups')) {
             abort_if(BouncerService::checkIp($request->ip()), 404);
         }
-        $agent = new UserAgentService;
-        $currentIp = $request->ip();
 
-        // Deduplicate by IP while keeping the newest login per IP. A bare
-        // groupBy over SELECT * is invalid under ONLY_FULL_GROUP_BY (500 on
-        // strict MySQL/MariaDB and Postgres) and indeterminate otherwise, so
-        // select MAX(id) per ip_address and fetch those rows.
-        $activity = AccountLog::whereIn('id', function ($q) use ($user) {
-            $q->from('account_logs')
-                ->selectRaw('MAX(id)')
-                ->where('user_id', $user->id)
-                ->where('action', 'auth.login')
-                ->groupBy('ip_address');
-        })
-            ->orderBy('created_at', 'desc')
+        $currentIp = $request->ip();
+        $cutoff = now()->subYear();
+
+        $latestLoginIds = AccountLog::query()
+            ->selectRaw('MAX(id)')
+            ->where('user_id', $user->id)
+            ->where('action', 'auth.login')
+            ->where('created_at', '>=', $cutoff)
+            ->groupBy('ip_address');
+
+        $activity = AccountLog::query()
+            ->select([
+                'id',
+                'action',
+                'ip_address',
+                'user_agent',
+                'created_at',
+            ])
+            ->whereIn('id', $latestLoginIds)
+            ->orderByDesc('created_at')
             ->limit(10)
             ->get()
-            ->map(function ($item) use ($agent, $currentIp) {
+            ->map(function (AccountLog $item) use ($currentIp) {
+                $agent = new UserAgentService;
                 $agent->setUserAgent($item->user_agent);
 
                 return [
                     'id' => $item->id,
                     'action' => $item->action,
                     'ip' => $item->ip_address,
-                    'ip_current' => $item->ip_address === $currentIp,
+                    'ip_current' => hash_equals(
+                        (string) $item->ip_address,
+                        (string) $currentIp
+                    ),
                     'is_mobile' => $agent->isMobile(),
                     'device' => $agent->device(),
                     'browser' => $agent->browser(),
                     'platform' => $agent->platform(),
-                    'created_at' => $item->created_at->format('c'),
+                    'created_at' => $item->created_at->toISOString(),
                 ];
             });
 
@@ -515,7 +555,8 @@ class ApiV1Dot1Controller extends Controller
         $filter = $request->input('filter', 'all');
         $limit = (int) $request->input('limit', 10);
         $legacy = ! $request->has('filter');
-        $currentId = $request->user()->token()->id;
+        $accessToken = $request->user()->token();
+        $currentId = $accessToken instanceof Token ? $accessToken->id : null;
 
         $query = $user->tokens()
             ->with('client')
@@ -580,7 +621,9 @@ class ApiV1Dot1Controller extends Controller
             abort_if(BouncerService::checkIp($request->ip()), 404);
         }
 
-        $currentId = $request->user()->token()->id;
+        $accessToken = $request->user()->token();
+        $currentId = $accessToken instanceof Token ? $accessToken->id : null;
+
         $token = $user->tokens()->with('client')->whereKey($id)->first();
         abort_if(! $token, 404);
         abort_if($token->id === $currentId, 422, 'You cannot revoke the current session. Sign out instead.');
@@ -622,7 +665,7 @@ class ApiV1Dot1Controller extends Controller
             abort_if(BouncerService::checkIp($request->ip()), 404);
         }
 
-        $rl = RateLimiter::attempt('pf:apiv1.1:iar:'.$request->ip(), config('pixelfed.app_registration_rate_limit_attempts', 3), function () {}, config('pixelfed.app_registration_rate_limit_decay', 1800));
+        $rl = RateLimiter::attempt('pf:apiv1.1:iar:'.$request->ip(), (int) config_cache('pixelfed.app_registration_rate_limit_attempts'), function () {}, (int) config_cache('pixelfed.app_registration_rate_limit_decay'));
         abort_if(! $rl, 400, 'Too many requests');
 
         $this->validate($request, [

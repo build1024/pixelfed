@@ -2,13 +2,11 @@
 
 namespace App\Services;
 
-use App\Jobs\QuotePipeline\RevokeQuoteAuthorizationPipeline;
+use App\Jobs\QuotePipeline\DeliverQuoteActivityPipeline;
 use App\Models\Profile;
 use App\Models\QuoteAuthorization;
 use App\Models\Status;
-use App\Util\ActivityPub\Helpers;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
 
 /**
  * FEP-044f: Consent-respecting quote posts.
@@ -438,7 +436,7 @@ class QuoteService
     /**
      * Withdraw consent. The row is kept (state revoked) so a repeat request
      * for the same quote post is auto-rejected, and the stamp URL serves
-     * 410 Gone. The Delete activity is sent from a queued job.
+     * 410 Gone. The Delete is delivered from a queued job, with retries.
      */
     public static function revoke(QuoteAuthorization $auth, bool $notify = true): void
     {
@@ -451,7 +449,7 @@ class QuoteService
         $auth->save();
 
         if ($notify) {
-            RevokeQuoteAuthorizationPipeline::dispatch($auth->id)->onQueue('high');
+            self::sendDelete($auth);
         }
     }
 
@@ -488,11 +486,17 @@ class QuoteService
     /**
      * Drop the stamp for a quote post whose author deleted it. Nothing is
      * federated, the quote is already gone on their side.
+     *
+     * Only approved rows are removed. A revoked row is a permanent deny-record
+     * that keeps a repeat request for the same quote post auto-rejected, so it
+     * must survive a Tombstone: otherwise a revoked quoter could Delete their
+     * own quote url to erase the deny-record and re-request a fresh stamp.
      */
     public static function forgetQuote(int $actorId, string $quoteUrl): void
     {
         QuoteAuthorization::whereActorId($actorId)
             ->whereQuoteUrl($quoteUrl)
+            ->approved()
             ->delete();
     }
 
@@ -598,6 +602,35 @@ class QuoteService
         self::deliver($auth->profile, $auth->actor, self::acceptActivity($auth, $requestUrl));
     }
 
+    /**
+     * Accept a QuoteRequest from a requester other than the actor the stamp is
+     * stored under, referencing the existing stamp as its result.
+     *
+     * Instrument validation is host-authoritative (a quote url only has to
+     * live on the requester's host), and the stamp is unique per
+     * (status_id, quote_url), so a second same-host requester for a quote url
+     * that already has a live stamp is answered with that stamp rather than
+     * rejected for an actor mismatch the validation layer never established.
+     * The Accept is addressed to the requester so it reaches them, not the
+     * first claimant.
+     */
+    public static function sendAcceptTo(QuoteAuthorization $auth, Profile $requester, string $requestUrl): void
+    {
+        $target = $auth->profile;
+
+        $activity = [
+            '@context' => self::REQUEST_CONTEXT,
+            'id' => $target->permalink('#accepts/quotes/'.$auth->id),
+            'type' => 'Accept',
+            'actor' => $target->permalink(),
+            'to' => $requester->permalink(),
+            'object' => self::requestObject($requester, $auth->status, $auth->quote_url, $requestUrl),
+            'result' => $auth->permalink(),
+        ];
+
+        self::deliver($target, $requester, $activity);
+    }
+
     public static function sendReject(Status $status, Profile $actor, string $quoteUrl, string $requestUrl): void
     {
         self::deliver($status->profile, $actor, self::rejectActivity($status, $actor, $quoteUrl, $requestUrl));
@@ -613,22 +646,15 @@ class QuoteService
     }
 
     /**
+     * Hand the activity to a queued job that retries on temporary failures.
+     * The quoting server sends its QuoteRequest once, so a lost Accept would
+     * leave the quote pending on their side for good.
+     *
      * @param  array<string, mixed>  $activity
      */
     private static function deliver(Profile $from, Profile $to, array $activity): void
     {
-        $inbox = $to->sharedInbox ?? $to->inbox_url;
-
-        if (! $inbox) {
-            Log::info('QuoteService: remote actor has no inbox', [
-                'profile_id' => $from->id,
-                'actor_id' => $to->id,
-            ]);
-
-            return;
-        }
-
-        Helpers::sendSignedObject($from, $inbox, $activity);
+        DeliverQuoteActivityPipeline::dispatch($from->id, $to->id, $activity)->onQueue('high');
     }
 
     /**

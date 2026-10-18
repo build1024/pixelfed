@@ -86,6 +86,15 @@ class StatusReplyPipeline implements ShouldQueue
             return;
         }
 
+        Status::whereId($reply->id)->update([
+            'reply_count' => DB::raw('COALESCE(reply_count, 0) + 1'),
+        ]);
+
+        StatusService::del($reply->id);
+        StatusService::del($status->id);
+        Cache::forget('status:replies:all:'.$reply->id);
+        Cache::forget('status:replies:all:'.$status->id);
+
         $exists = Notification::whereProfileId($target->id)
             ->whereActorId($actor->id)
             ->whereIn('action', ['mention', 'comment'])
@@ -93,27 +102,9 @@ class StatusReplyPipeline implements ShouldQueue
             ->whereItemType(Status::class)
             ->count();
 
-        if ($actor->id === $target || $exists !== 0) {
+        if ($actor->id === $target->id || $exists !== 0) {
             return;
         }
-
-        if (db_is_mysql_maria()) {
-            // todo: refactor
-            // $exp = DB::raw("select id, in_reply_to_id from statuses, (select @pv := :kid) initialisation where id > @pv and find_in_set(in_reply_to_id, @pv) > 0 and @pv := concat(@pv, ',', id)");
-            // $expQuery = $exp->getValue(DB::connection()->getQueryGrammar());
-            // $count = DB::select($expQuery, [ 'kid' => $reply->id ]);
-            // $reply->reply_count = count($count);
-            $reply->reply_count = $reply->reply_count + 1;
-            $reply->save();
-        } else {
-            $reply->reply_count = $reply->reply_count + 1;
-            $reply->save();
-        }
-
-        StatusService::del($reply->id);
-        StatusService::del($status->id);
-        Cache::forget('status:replies:all:'.$reply->id);
-        Cache::forget('status:replies:all:'.$status->id);
 
         if ($target->user_id && $target->domain === null) {
             DB::transaction(function () use ($target, $actor, $status) {

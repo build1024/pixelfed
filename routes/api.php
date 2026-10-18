@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AdminApiController;
 use App\Http\Controllers\Api\ApiV1Controller;
 use App\Http\Controllers\Api\ApiV1Dot1Controller;
 use App\Http\Controllers\Api\ApiV2Controller;
+use App\Http\Controllers\Api\ApiV2Dot1Controller;
 use App\Http\Controllers\Api\V1\Admin\DomainBlocksController;
 use App\Http\Controllers\Api\V1\DomainBlockController;
 use App\Http\Controllers\Api\V1\TagsController;
@@ -13,6 +14,7 @@ use App\Http\Controllers\AppRegisterController;
 use App\Http\Controllers\CollectionController;
 use App\Http\Controllers\ComposeController;
 use App\Http\Controllers\CustomFilterController;
+use App\Http\Controllers\DirectConversationController;
 use App\Http\Controllers\DirectMessageController;
 use App\Http\Controllers\DiscoverController;
 use App\Http\Controllers\FederationController;
@@ -45,6 +47,7 @@ $middleware = ['auth:sanctum,api'];
 Route::post('/f/inbox', [FederationController::class, 'sharedInbox']);
 Route::post('/users/{username}/inbox', [FederationController::class, 'userInbox']);
 Route::get('/users/{username}/followers_synchronization', [FederationController::class, 'userFollowersSynchronization']);
+Route::get('/f/block_sync', [FederationController::class, 'blockSynchronization']);
 Route::get('i/actor', [InstanceActorController::class, 'profile']);
 Route::post('i/actor/inbox', [InstanceActorController::class, 'inbox']);
 Route::get('i/actor/outbox', [InstanceActorController::class, 'outbox']);
@@ -160,6 +163,8 @@ Route::prefix('api')->group(function () use ($middleware) {
         Route::post('avatar/update', [ApiController::class, 'avatarUpdate'])->middleware($middleware);
         Route::get('blocks', [ApiV1Controller::class, 'accountBlocks'])->middleware($middleware);
         Route::get('conversations', [ApiV1Controller::class, 'conversations'])->middleware($middleware);
+        Route::delete('conversations/{id}', [ApiV1Controller::class, 'conversationDelete'])->middleware($middleware);
+        Route::post('conversations/{id}/read', [ApiV1Controller::class, 'conversationRead'])->middleware($middleware);
         Route::get('custom_emojis', [ApiV1Controller::class, 'customEmojis']);
         Route::get('domain_blocks', [DomainBlockController::class, 'index'])->middleware($middleware);
         Route::post('domain_blocks', [DomainBlockController::class, 'store'])->middleware($middleware);
@@ -275,6 +280,21 @@ Route::prefix('api')->group(function () use ($middleware) {
             Route::post('thread/read', [DirectMessageController::class, 'read'])->middleware($middleware);
             Route::post('lookup', [DirectMessageController::class, 'composeLookup'])->middleware($middleware);
             Route::get('compose/mutuals', [DirectMessageController::class, 'composeMutuals'])->middleware($middleware);
+
+            Route::get('unread_count', [DirectConversationController::class, 'unreadCount'])->middleware($middleware);
+            Route::get('conversations', [DirectConversationController::class, 'index'])->middleware($middleware);
+            Route::post('conversations', [DirectConversationController::class, 'store'])->middleware($middleware);
+            Route::get('conversations/{id}', [DirectConversationController::class, 'show'])->middleware($middleware);
+            Route::get('conversations/{id}/messages', [DirectConversationController::class, 'messages'])->middleware($middleware);
+            Route::post('conversations/{id}/messages', [DirectConversationController::class, 'send'])->middleware($middleware);
+            Route::delete('conversations/{id}/messages/{messageId}', [DirectConversationController::class, 'deleteMessage'])->middleware($middleware);
+            Route::post('conversations/{id}/read', [DirectConversationController::class, 'read'])->middleware($middleware);
+            Route::post('conversations/{id}/accept', [DirectConversationController::class, 'accept'])->middleware($middleware);
+            Route::post('conversations/{id}/mute', [DirectConversationController::class, 'mute'])->middleware($middleware);
+            Route::post('conversations/{id}/unmute', [DirectConversationController::class, 'unmute'])->middleware($middleware);
+            Route::post('conversations/{id}/hide', [DirectConversationController::class, 'hide'])->middleware($middleware);
+            Route::post('conversations/{id}/unhide', [DirectConversationController::class, 'unhide'])->middleware($middleware);
+            Route::post('conversations/{id}/leave', [DirectConversationController::class, 'leave'])->middleware($middleware);
         });
 
         Route::prefix('archive')->group(function () use ($middleware) {
@@ -345,6 +365,14 @@ Route::prefix('api')->group(function () use ($middleware) {
             Route::get('carousel', [StoryApiV1Controller::class, 'carouselNext'])->middleware($middleware);
             Route::get('mention-autocomplete', [StoryApiV1Controller::class, 'mentionAutocomplete'])->middleware($middleware);
         });
+    });
+
+    Route::prefix('v2.1')->group(function () use ($middleware) {
+        Route::get('config', [ApiV2Dot1Controller::class, 'getConfig']);
+
+        Route::get('account/timeline/settings', [ApiV2Dot1Controller::class, 'accountTimelineSettings'])->middleware($middleware);
+        Route::post('account/timeline/settings', [ApiV2Dot1Controller::class, 'updateAccountTimelineSettings'])->middleware($middleware);
+        Route::post('account/remove/permanent', [ApiV2Dot1Controller::class, 'accountPermanentDelete'])->middleware($middleware);
     });
 
     Route::prefix('live')->group(function () {

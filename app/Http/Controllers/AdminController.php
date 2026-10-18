@@ -56,7 +56,6 @@ class AdminController extends Controller
     public function __construct()
     {
         $this->middleware('admin');
-        $this->middleware('dangerzone');
     }
 
     public function home(): View
@@ -460,10 +459,12 @@ class AdminController extends Controller
         foreach ($fields as $field => $type) {
             switch ($type) {
                 case 'string':
+                    // @phpstan-ignore-next-line
                     if ($request->{$field} != $news->{$field}) {
                         if ($field === 'title') {
                             $news->slug = $slug;
                         }
+                        // @phpstan-ignore-next-line
                         $news->{$field} = $request->{$field};
                         $changed = true;
                         array_push($changedFields, $field);
@@ -472,7 +473,9 @@ class AdminController extends Controller
 
                 case 'boolean':
                     $state = $request->{$field} == 'on' ? true : false;
+                    // @phpstan-ignore-next-line
                     if ($state != $news->{$field}) {
+                        // @phpstan-ignore-next-line
                         $news->{$field} = $state;
                         $changed = true;
                         array_push($changedFields, $field);
@@ -619,6 +622,7 @@ class AdminController extends Controller
         $emoji->save();
         $key = CustomEmoji::CACHE_KEY.str_replace(':', '', $emoji->shortcode);
         Cache::forget($key);
+        Cache::forget('pf:custom_emoji');
 
         return redirect()->back();
     }
@@ -668,6 +672,7 @@ class AdminController extends Controller
         $emoji = CustomEmoji::findOrFail($id);
         Storage::delete("public/{$emoji->media_path}");
         Cache::forget('pf:custom_emoji');
+        Cache::forget(CustomEmoji::CACHE_KEY.str_replace(':', '', $emoji->shortcode));
         $emoji->delete();
 
         return redirect(route('admin.custom-emoji'));

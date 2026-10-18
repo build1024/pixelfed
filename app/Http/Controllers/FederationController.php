@@ -5,12 +5,14 @@ namespace App\Http\Controllers;
 use App\Jobs\InboxPipeline\DeleteWorker;
 use App\Jobs\InboxPipeline\InboxValidator;
 use App\Jobs\InboxPipeline\InboxWorker;
+use App\Models\DmMessage;
 use App\Models\FeatureAuthorization;
 use App\Models\Profile;
 use App\Models\QuoteAuthorization;
 use App\Models\Status;
 use App\Services\AccountService;
 use App\Services\ActivityPubSignedFetchService;
+use App\Services\BlockSyncService;
 use App\Services\FeaturedCollectionService;
 use App\Services\FollowersSyncService;
 use App\Services\InstanceService;
@@ -190,22 +192,22 @@ class FederationController extends Controller
             if (isset($obj['object']) && isset($obj['object']['type']) && isset($obj['object']['id'])) {
                 if ($obj['object']['type'] === 'Person') {
                     if (Profile::whereRemoteUrl($obj['object']['id'])->exists()) {
-                        dispatch(new DeleteWorker($headers, $payload))->onQueue('inbox');
+                        dispatch(new DeleteWorker($headers, $payload, $request->getPathInfo()))->onQueue('inbox');
 
                         return;
                     }
                 }
 
                 if ($obj['object']['type'] === 'Tombstone') {
-                    if (Status::whereObjectUrl($obj['object']['id'])->exists()) {
-                        dispatch(new DeleteWorker($headers, $payload))->onQueue('delete');
+                    if ($this->isKnownTombstone($obj['object']['id'])) {
+                        dispatch(new DeleteWorker($headers, $payload, $request->getPathInfo()))->onQueue('delete');
 
                         return;
                     }
                 }
 
                 if ($obj['object']['type'] === 'Story') {
-                    dispatch(new DeleteWorker($headers, $payload))->onQueue('story');
+                    dispatch(new DeleteWorker($headers, $payload, $request->getPathInfo()))->onQueue('story');
 
                     return;
                 }
@@ -219,6 +221,21 @@ class FederationController extends Controller
         } else {
             dispatch(new InboxValidator($username, $headers, $payload))->onQueue('high');
         }
+    }
+
+    /**
+     * Deletes are dropped at the door unless they are for something this
+     * server has. A direct message is not a status, so it has to be looked
+     * for separately or its Delete never reaches the inbox worker.
+     */
+    protected function isKnownTombstone(mixed $id): bool
+    {
+        if (! is_string($id) || $id === '') {
+            return false;
+        }
+
+        return Status::whereObjectUrl($id)->exists()
+            || DmMessage::whereObjectUri($id)->exists();
     }
 
     public function sharedInbox(Request $request): void
@@ -253,7 +270,7 @@ class FederationController extends Controller
                 }
 
                 if ($obj['object']['type'] === 'Tombstone') {
-                    if (Status::whereObjectUrl($obj['object']['id'])->exists()) {
+                    if ($this->isKnownTombstone($obj['object']['id'])) {
                         dispatch(new DeleteWorker($headers, $payload))->onQueue('delete');
 
                         return;
@@ -347,6 +364,56 @@ class FederationController extends Controller
             ->json($res, 200, [], JSON_UNESCAPED_SLASHES)
             ->header('Content-Type', 'application/activity+json')
             ->header('Cache-Control', 'private, no-store');
+    }
+
+    public function blockSynchronization(Request $request): Response|JsonResponse
+    {
+        abort_if(! BlockSyncService::disclosing(), 404);
+        $signer = ActivityPubSignedFetchService::verify($request);
+        abort_if(! $signer, 401);
+        $authority = FollowersSyncService::authority($signer->remote_url);
+        abort_if(! $authority, 401);
+        abort_if(! BlockSyncService::isDisclosedPeer($authority), 403);
+
+        $pairs = BlockSyncService::disclosedPairs($authority);
+        $digest = BlockSyncService::digest($pairs);
+        $etag = '"'.$digest.'"';
+
+        $headers = [
+            'Cache-Control' => 'private, no-store',
+            'ETag' => $etag,
+        ];
+
+        $ifNoneMatch = array_map(
+            fn (string $tag) => preg_replace('#^W/#', '', trim($tag)),
+            explode(',', (string) $request->headers->get('If-None-Match', ''))
+        );
+
+        if (in_array($etag, $ifNoneMatch, true)) {
+            return response('', 304, $headers);
+        }
+
+        $res = [
+            '@context' => [
+                'https://www.w3.org/ns/activitystreams',
+                [
+                    'blockSynchronizationDigest' => BlockSyncService::DIGEST_CONTEXT_TERM,
+                ],
+            ],
+            'id' => BlockSyncService::endpointUrl(),
+            'type' => 'OrderedCollection',
+            'totalItems' => count($pairs),
+            'blockSynchronizationDigest' => $digest,
+            'orderedItems' => array_map(fn (array $pair) => [
+                'type' => 'Block',
+                'actor' => $pair['actor'],
+                'object' => $pair['object'],
+            ], $pairs),
+        ];
+
+        return response()
+            ->json($res, 200, $headers, JSON_UNESCAPED_SLASHES)
+            ->header('Content-Type', 'application/activity+json');
     }
 
     public function userFeatureAuthorization(Request $request, $username, $id): JsonResponse

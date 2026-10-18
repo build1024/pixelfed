@@ -10,6 +10,7 @@ use App\Models\QuoteAuthorization;
 use App\Models\UserFilter;
 use App\Services\AccountService;
 use App\Services\FeaturedCollectionService;
+use App\Services\FollowerService;
 use App\Services\QuoteService;
 use App\Services\RelationshipService;
 use Illuminate\Http\Request;
@@ -50,6 +51,11 @@ trait PrivacySettings
             'show_atom',
         ];
 
+        // Captured before the loop mutates is_private. When the account was
+        // private at render time the crawlable checkbox is disabled and omitted
+        // from the POST, so its prior value must be preserved rather than reset.
+        $wasPrivate = (bool) $profile->getOriginal('is_private');
+
         $profile->indexable = $request->input('indexable') == 'on';
         $profile->is_suggestable = $request->input('is_suggestable') == 'on';
         $profile->save();
@@ -78,6 +84,9 @@ trait PrivacySettings
                 }
                 Cache::forget('profiles:private');
             } elseif ($field === 'crawlable') {
+                if ($wasPrivate) {
+                    continue;
+                }
                 if ($form == 'on') {
                     $settings->{$field} = false;
                 } else {
@@ -287,30 +296,42 @@ trait PrivacySettings
         $settings = $request->user()->settings;
 
         if ($mode !== 'keep-all') {
+            $query = Follower::whereFollowingId($profile->id);
+
             switch ($mode) {
                 case 'mutual-only':
                     $following = $profile->following()->pluck('profiles.id');
-                    Follower::whereFollowingId($profile->id)->whereNotIn('profile_id', $following)->delete();
+                    $query->whereNotIn('profile_id', $following);
                     break;
 
                 case 'only-followers':
                     $ts = now()->subMinutes($duration);
-                    Follower::whereFollowingId($profile->id)->where('created_at', '>', $ts)->delete();
+                    $query->where('created_at', '>', $ts);
                     break;
 
                 case 'remove-all':
-                    Follower::whereFollowingId($profile->id)
-                        ->chunkById(100, function ($followers) {
-                            foreach ($followers as $follower) {
-                                FeedUnfollowPipeline::dispatch($follower->profile_id, $follower->following_id)->onQueue('feed');
-                            }
-                        });
-                    Follower::whereFollowingId($profile->id)->delete();
+                    // no additional constraint: remove every follower
                     break;
 
                 default:
-                    // code...
+                    $query = null;
                     break;
+            }
+
+            // Delete followers one at a time so FollowerService::remove() runs
+            // for each: a bulk ->delete() skips the model event / observer and
+            // leaves the follower in the Redis sorted sets that back
+            // FollowerService::follows(), which gates private-content access.
+            // A removed follower must lose access, not keep it for the 7-day
+            // cache-marker window.
+            if ($query) {
+                $query->chunkById(100, function ($followers) {
+                    foreach ($followers as $follower) {
+                        FollowerService::remove($follower->profile_id, $follower->following_id);
+                        FeedUnfollowPipeline::dispatch($follower->profile_id, $follower->following_id)->onQueue('feed');
+                        $follower->delete();
+                    }
+                });
             }
         }
         $profile->is_private = true;
